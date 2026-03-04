@@ -5,6 +5,7 @@
 #include <FS.h>
 #include <SD_MMC.h>
 #include <math.h>
+#include "TouchDrvCSTXXX.hpp"
 
 // ─── DISPLAY SETUP ────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -12,6 +13,11 @@ Arduino_DataBus *bus = new Arduino_ESP32QSPI(
 
 Arduino_CO5300 *gfx = new Arduino_CO5300(
   bus, LCD_RESET, 0, LCD_WIDTH, LCD_HEIGHT, 6, 0, 0, 0);
+
+// ─── TOUCH SETUP ──────────────────────────────────────────────────────────────
+TouchDrvCST92xx touch;
+int16_t touchX[5], touchY[5];
+volatile bool touchInterrupt = false;
 
 // ─── SPRITE DEFINITIONS ───────────────────────────────────────────────────────
 #define SPRITE_COUNT 8
@@ -36,7 +42,6 @@ const char* spriteFiles[SPRITE_COUNT] = {
 #define SPR_DISGUST   6
 #define SPR_CONFUSED  7
 
-// Each sprite stored as RGB565 in PSRAM
 struct Sprite {
   uint16_t* rgb;
   int width;
@@ -47,42 +52,56 @@ Sprite sprites[SPRITE_COUNT];
 
 // ─── STATE MACHINE ────────────────────────────────────────────────────────────
 enum Mode {
-  FACE_MODE,
-  TEXT_MODE
+  FACE_NORMAL,
+  FACE_REACTION,
+  TEXT_REACTION,
+  FACE_HOLD,
 };
 
-Mode currentMode  = FACE_MODE;
+Mode currentMode  = FACE_NORMAL;
 int currentSprite = SPR_NORMAL;
+
+enum Reaction {
+  REACTION_NONE,
+  REACTION_HAPPY,
+  REACTION_MAD
+};
+
+Reaction activeReaction = REACTION_NONE;
 
 // ─── TIMING ───────────────────────────────────────────────────────────────────
 unsigned long lastBlinkTime  = 0;
 unsigned long blinkStartTime = 0;
-unsigned long textModeStart  = 0;
+unsigned long stateStartTime = 0;
 unsigned long lastFloatDraw  = 0;
 int lastFloatOffset          = 0;
 
 bool isBlinking = false;
 
-const unsigned long BLINK_INTERVAL     = 3000;
-const unsigned long BLINK_LENGTH       = 150;
-const unsigned long TEXT_MODE_DURATION = 4000;
-const unsigned long FLOAT_INTERVAL     = 30; // 20fps to start, tune later
+const unsigned long BLINK_INTERVAL         = 3000;
+const unsigned long BLINK_LENGTH           = 150;
+const unsigned long REACTION_FACE_DURATION = 2000;
+const unsigned long REACTION_TEXT_DURATION = 4000;
+const unsigned long REACTION_HOLD_DURATION = 10000;
+const unsigned long FLOAT_INTERVAL         = 30;
+const float FLOAT_AMPLITUDE                = 20.0;
+const float FLOAT_SPEED                    = 0.00065;
 
-// ─── FLOAT ANIMATION ──────────────────────────────────────────────────────────
-const float FLOAT_AMPLITUDE = 20.0;
-const float FLOAT_SPEED     = 0.00065;
+// ─── TAP DETECTION ────────────────────────────────────────────────────────────
+int tapCount                 = 0;
+unsigned long tapWindowStart = 0;
+unsigned long lastTapTime    = 0;
 
-int getFloatOffset() {
-  return (int)(sin(millis() * FLOAT_SPEED) * FLOAT_AMPLITUDE);
-}
+const unsigned long TAP_WINDOW = 800;
+const unsigned long TAP_GAP    = 100; // min ms between taps
 
 // ─── SCREEN ───────────────────────────────────────────────────────────────────
 const int SCREEN_CX = 233;
 const int SCREEN_CY = 233;
 
-// ─── TOUCH ────────────────────────────────────────────────────────────────────
-bool isTouched() {
-  return digitalRead(TP_INT) == LOW;
+// ─── TOUCH INTERRUPT ──────────────────────────────────────────────────────────
+void IRAM_ATTR onTouchInterrupt() {
+  touchInterrupt = true;
 }
 
 // ─── BMP LOADER ───────────────────────────────────────────────────────────────
@@ -145,16 +164,12 @@ bool loadBMP(const char* filename, Sprite& sprite) {
 }
 
 // ─── DRAW SPRITE ──────────────────────────────────────────────────────────────
-// Draws the sprite at floatOffset
-// When float position changes, fills the exposed strip with black
-// Draws in chunks of ROWS_PER_CHUNK for better display throughput
 #define ROWS_PER_CHUNK 8
 
 void drawSprite(int index, int floatOffset, int prevOffset) {
   if (!sprites[index].rgb) return;
   Sprite& s = sprites[index];
 
-  // Erase strip exposed by movement
   if (floatOffset != prevOffset) {
     if (floatOffset > prevOffset) {
       gfx->fillRect(0, prevOffset, s.width, floatOffset - prevOffset, RGB565_BLACK);
@@ -163,9 +178,8 @@ void drawSprite(int index, int floatOffset, int prevOffset) {
     }
   }
 
-  // Draw in chunks of ROWS_PER_CHUNK rows at a time
   for (int startRow = 0; startRow < s.height; startRow += ROWS_PER_CHUNK) {
-    int endRow = min(startRow + ROWS_PER_CHUNK, s.height);
+    int endRow      = min(startRow + ROWS_PER_CHUNK, s.height);
     int chunkHeight = endRow - startRow;
     gfx->draw16bitRGBBitmap(
       0,
@@ -177,8 +191,8 @@ void drawSprite(int index, int floatOffset, int prevOffset) {
   }
 }
 
-// ─── TEXT MODE ────────────────────────────────────────────────────────────────
-void drawTextMode(const char* message) {
+// ─── TEXT SCREEN ──────────────────────────────────────────────────────────────
+void drawTextScreen(const char* message) {
   gfx->fillScreen(RGB565_BLACK);
   gfx->setTextColor(RGB565_WHITE);
   gfx->setTextSize(4, 4, 1);
@@ -187,6 +201,45 @@ void drawTextMode(const char* message) {
   int textY  = SCREEN_CY - 20;
   gfx->setCursor(textX, textY);
   gfx->println(message);
+}
+
+// ─── REACTION TRIGGER ─────────────────────────────────────────────────────────
+void triggerReaction(Reaction r) {
+  activeReaction = r;
+  currentMode    = FACE_REACTION;
+  stateStartTime = millis();
+  isBlinking     = false;
+
+  if (r == REACTION_HAPPY) {
+    currentSprite = SPR_HAPPY;
+    Serial.println("Reaction: HAPPY");
+  } else if (r == REACTION_MAD) {
+    currentSprite = SPR_MAD;
+    Serial.println("Reaction: MAD");
+  }
+
+  gfx->fillScreen(RGB565_BLACK);
+  drawSprite(currentSprite, 0, 0);
+  lastFloatOffset = 0;
+}
+
+// ─── RETURN TO NORMAL ─────────────────────────────────────────────────────────
+void returnToNormal() {
+  activeReaction  = REACTION_NONE;
+  currentMode     = FACE_NORMAL;
+  currentSprite   = SPR_NORMAL;
+  isBlinking      = false;
+  lastBlinkTime   = millis();
+  lastFloatDraw   = millis();
+  lastFloatOffset = 0;
+  gfx->fillScreen(RGB565_BLACK);
+  drawSprite(SPR_NORMAL, 0, 0);
+  Serial.println("Returned to normal");
+}
+
+// ─── FLOAT OFFSET ─────────────────────────────────────────────────────────────
+int getFloatOffset() {
+  return (int)(sin(millis() * FLOAT_SPEED) * FLOAT_AMPLITUDE);
 }
 
 // ─── PRELOAD ALL SPRITES ──────────────────────────────────────────────────────
@@ -206,10 +259,16 @@ void setup() {
   Serial.begin(115200);
   Wire.begin(IIC_SDA, IIC_SCL);
 
-  // Touch init
-  pinMode(TP_RESET, OUTPUT);
-  digitalWrite(TP_RESET, HIGH);
-  pinMode(TP_INT, INPUT_PULLUP);
+  // Touch init using SensorLib driver
+  touch.setPins(TP_RESET, TP_INT);
+  if (!touch.begin(Wire, 0x5A, IIC_SDA, IIC_SCL)) {
+    Serial.println("Touch init failed!");
+  } else {
+    Serial.println("Touch initialized.");
+    Serial.print("Touch model: ");
+    Serial.println(touch.getModelName());
+  }
+  attachInterrupt(TP_INT, onTouchInterrupt, FALLING);
 
   // SD card init
   SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_DATA);
@@ -238,18 +297,71 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── TEXT MODE TIMEOUT ──
-  if (currentMode == TEXT_MODE && (now - textModeStart >= TEXT_MODE_DURATION)) {
-    currentMode = FACE_MODE;
-    gfx->fillScreen(RGB565_BLACK);
-    lastBlinkTime = now;
-    return;
+  // ── TAP DETECTION via SensorLib ──
+  if (currentMode == FACE_NORMAL && touchInterrupt) {
+    touchInterrupt = false;
+    uint8_t touched = touch.getPoint(touchX, touchY, touch.getSupportTouchPoint());
+    if (touched > 0) {
+      // Only count if enough time has passed since last tap
+      if (now - lastTapTime > TAP_GAP) {
+        tapCount++;
+        lastTapTime    = now;
+        tapWindowStart = now;
+        Serial.print("Tap! count:");
+        Serial.println(tapCount);
+      }
+    }
   }
 
-  // ── FACE MODE ──
-  if (currentMode == FACE_MODE) {
+  // Evaluate tap count after window expires
+  if (tapCount > 0 && (now - tapWindowStart > TAP_WINDOW)) {
+    if (tapCount == 2) {
+      triggerReaction(REACTION_HAPPY);
+    } else if (tapCount == 3) {
+      triggerReaction(REACTION_MAD);
+    }
+    tapCount = 0;
+  }
 
-    // ── BLINK ──
+  // ── REACTION SEQUENCE ──
+  if (currentMode == FACE_REACTION) {
+    if (now - stateStartTime >= REACTION_FACE_DURATION) {
+      currentMode    = TEXT_REACTION;
+      stateStartTime = now;
+      if (activeReaction == REACTION_HAPPY) {
+        drawTextScreen("hi!");
+      } else if (activeReaction == REACTION_MAD) {
+        drawTextScreen("hisssss.");
+      }
+    }
+  }
+
+  if (currentMode == TEXT_REACTION) {
+    if (now - stateStartTime >= REACTION_TEXT_DURATION) {
+      currentMode    = FACE_HOLD;
+      stateStartTime = now;
+      gfx->fillScreen(RGB565_BLACK);
+      drawSprite(currentSprite, 0, 0);
+      lastFloatOffset = 0;
+      lastFloatDraw   = now;
+    }
+  }
+
+  if (currentMode == FACE_HOLD) {
+    if (now - stateStartTime >= REACTION_HOLD_DURATION) {
+      returnToNormal();
+      return;
+    }
+    if (now - lastFloatDraw >= FLOAT_INTERVAL) {
+      int newOffset   = getFloatOffset();
+      drawSprite(currentSprite, newOffset, lastFloatOffset);
+      lastFloatOffset = newOffset;
+      lastFloatDraw   = now;
+    }
+  }
+
+  // ── NORMAL IDLE ──
+  if (currentMode == FACE_NORMAL) {
     if (!isBlinking && (now - lastBlinkTime >= BLINK_INTERVAL)) {
       isBlinking     = true;
       blinkStartTime = now;
@@ -261,10 +373,9 @@ void loop() {
       lastBlinkTime = now;
     }
 
-    // ── FLOAT ANIMATION ──
     if (!isBlinking && (now - lastFloatDraw >= FLOAT_INTERVAL)) {
       int newOffset   = getFloatOffset();
-      drawSprite(currentSprite, newOffset, lastFloatOffset);
+      drawSprite(SPR_NORMAL, newOffset, lastFloatOffset);
       lastFloatOffset = newOffset;
       lastFloatDraw   = now;
     }

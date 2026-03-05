@@ -72,6 +72,7 @@ enum Mode {
   FACE_SLEEP,
   TEXT_SLEEP,
   FACE_GLITCH,
+  FACE_JUMP,
 };
 
 Mode currentMode  = FACE_NORMAL;
@@ -148,6 +149,21 @@ const unsigned long TERMINAL_GLITCH_TIME = 1000;
 const unsigned long FLOAT_INTERVAL = 19;
 const float FLOAT_AMPLITUDE        = 7.0;
 const float FLOAT_SPEED            = 0.0006;
+
+// Jump animation
+#define JUMP_FRAME_COUNT   11
+#define JUMP_FRAME_MS      0   // 42ms ≈ 24fps
+const unsigned long HOLD_MIN = 2000;
+const unsigned long HOLD_MAX = 5000;
+
+int jumpFrameIndex          = 0;
+unsigned long lastJumpFrame = 0;
+unsigned long touchDownTime = 0;
+bool touchHeld              = false;
+
+// Single reusable PSRAM frame buffer for all SD animation streaming
+// One frame at a time — decode into here, blast to display, reuse
+uint16_t* frameBuffer = nullptr;
 
 // ─── TAP DETECTION ────────────────────────────────────────────────────────────
 int tapCount                 = 0;
@@ -238,6 +254,58 @@ void drawSprite(int index, int floatOffset, int prevOffset) {
       s.width, chunkHeight
     );
   }
+}
+
+// ─── DRAW JUMP FRAME (streamed from SD into PSRAM buffer) ────────────────────
+void drawJumpFrame(int frameIndex) {
+  if (!frameBuffer) return;
+
+  char filename[16];
+  snprintf(filename, sizeof(filename), "/jump%d.bmp", frameIndex + 1);
+
+  File file = SD_MMC.open(filename);
+  if (!file) {
+    Serial.print("Jump frame missing: "); Serial.println(filename);
+    return;
+  }
+  if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
+  file.seek(10);
+  uint32_t pixelOffset = 0;
+  file.read((uint8_t*)&pixelOffset, 4);
+  file.seek(18);
+  int32_t imgWidth = 0, imgHeight = 0;
+  file.read((uint8_t*)&imgWidth, 4);
+  file.read((uint8_t*)&imgHeight, 4);
+  bool flipped = imgHeight > 0;
+  if (imgHeight < 0) imgHeight = -imgHeight;
+
+  uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
+  uint8_t rowBuf[rowSize];
+  file.seek(pixelOffset);
+
+  unsigned long t = millis();
+
+  for (int row = 0; row < imgHeight; row++) {
+    file.read(rowBuf, rowSize);
+    int destRow = flipped ? (imgHeight - 1 - row) : row;
+    uint16_t* dst = frameBuffer + destRow * imgWidth;
+    for (int col = 0; col < imgWidth; col++) {
+      uint8_t b = rowBuf[col * 3];
+      uint8_t g = rowBuf[col * 3 + 1];
+      uint8_t r = rowBuf[col * 3 + 2];
+      dst[col] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    }
+  }
+  file.close();
+
+  // Center horizontally, sit toward bottom to match character in normal.bmp
+  int drawX = (SCREEN_W - imgWidth) / 2;
+  int drawY = SCREEN_H - imgHeight - 20;
+
+  
+  gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
+  Serial.print("Frame "); Serial.print(frameIndex + 1);
+  Serial.print(" "); Serial.print(millis() - t); Serial.println("ms");
 }
 
 // ─── TEXT SCREENS ─────────────────────────────────────────────────────────────
@@ -367,7 +435,7 @@ void triggerReaction(Reaction r) {
     scaredPhase   = SCARED_PHASE_FACE1;
     Serial.println("Reaction: SCARED");
   }
-  gfx->fillScreen(BG_COLOR);
+  
   drawSprite(currentSprite, 0, 0);
   lastFloatOffset = 0;
 }
@@ -384,7 +452,7 @@ void returnToNormal() {
   lastActivityTime = millis();
   lastFloatOffset  = 0;
   gfx->setBrightness(AWAKE_BRIGHTNESS);
-  gfx->fillScreen(BG_COLOR);
+  
   drawSprite(SPR_NORMAL, 0, 0);
   Serial.println("Returned to normal");
 }
@@ -396,7 +464,6 @@ void enterSadMode() {
   stateStartTime  = millis();
   isBlinking      = false;
   lastFloatOffset = 0;
-  gfx->fillScreen(BG_COLOR);
   drawSprite(SPR_SAD, 0, 0);
   Serial.println("Entered sad mode");
 }
@@ -408,7 +475,6 @@ void enterSleepMode() {
   lastZzzTime     = millis();
   lastFloatOffset = 0;
   gfx->setBrightness(SLEEP_BRIGHTNESS);
-  gfx->fillScreen(BG_COLOR);
   drawSprite(SPR_BLINK, 0, 0);
   Serial.println("Entered sleep mode");
 }
@@ -428,6 +494,9 @@ void preloadSprites() {
   Serial.print("All sprites loaded in ");
   Serial.print(millis() - start);
   Serial.println("ms");
+  Serial.print("Free PSRAM after sprites: ");
+  Serial.print(ESP.getFreePsram() / 1024);
+  Serial.println("KB");
 }
 
 // ─── SETUP ────────────────────────────────────────────────────────────────────
@@ -462,7 +531,6 @@ void setup() {
     Serial.println("Display init failed!");
   }
   gfx->setBrightness(AWAKE_BRIGHTNESS);
-  gfx->fillScreen(BG_COLOR);
 
   preloadSprites();
 
@@ -473,6 +541,14 @@ void setup() {
 
   scheduleNextDisgust();
   scheduleNextGlitch();
+
+  // Allocate reusable animation frame buffer in PSRAM
+  frameBuffer = (uint16_t*)ps_malloc(466 * 466 * 2);
+  if (!frameBuffer) {
+    Serial.println("Frame buffer alloc failed!");
+  } else {
+    Serial.println("Frame buffer ready.");
+  }
 
   drawSprite(SPR_NORMAL, 0, 0);
 }
@@ -486,19 +562,41 @@ void loop() {
     uint8_t touched = touch.getPoint(touchX, touchY, touch.getSupportTouchPoint());
     if (touched > 0) {
       lastActivityTime = now;
+
+      // Wake from sleep or sad
       if (currentMode == FACE_SLEEP || currentMode == TEXT_SLEEP || currentMode == FACE_SAD) {
         returnToNormal();
-        tapCount = 0;
+        tapCount  = 0;
+        touchHeld = false;
         return;
       }
+
       if (currentMode == FACE_NORMAL) {
+        if (!touchHeld) {
+          touchHeld     = true;
+          touchDownTime = now;
+        }
         if (now - lastTapTime > TAP_GAP) {
           tapCount++;
           lastTapTime    = now;
           tapWindowStart = now;
-          Serial.print("Tap! count:"); Serial.println(tapCount);
         }
       }
+    } else {
+      // Finger lifted — check for jump range
+      if (touchHeld && currentMode == FACE_NORMAL) {
+        Serial.print("Released. tapCount: "); Serial.println(tapCount);
+        if (tapCount >= 10 && tapCount <= 60) {
+          currentMode    = FACE_JUMP;
+          jumpFrameIndex = 0;
+          lastJumpFrame  = now;
+          tapCount       = 0;
+          touchHeld      = false;
+          Serial.println("Jump triggered!");
+          return;
+        }
+      }
+      touchHeld = false;
     }
   }
 
@@ -586,6 +684,19 @@ void loop() {
     return;
   }
 
+  if (currentMode == FACE_JUMP) {
+    if (now - lastJumpFrame >= JUMP_FRAME_MS) {
+      drawJumpFrame(jumpFrameIndex);
+      lastJumpFrame = now;
+      jumpFrameIndex++;
+      if (jumpFrameIndex >= JUMP_FRAME_COUNT) {
+        returnToNormal();
+        Serial.println("Jump complete");
+      }
+    }
+    return;
+  }
+
   if (currentMode == FACE_SAD) return;
 
   if (currentMode == FACE_SLEEP) {
@@ -602,7 +713,6 @@ void loop() {
     if (now - stateStartTime >= ZZZ_DURATION) {
       currentMode = FACE_SLEEP;
       lastZzzTime = now;
-      gfx->fillScreen(BG_COLOR);
       drawSprite(SPR_BLINK, 0, 0);
     }
     return;
@@ -617,13 +727,11 @@ void loop() {
       } else if (scaredPhase == SCARED_PHASE_TEXT && now - stateStartTime >= SCARED_TEXT_DURATION) {
         scaredPhase    = SCARED_PHASE_FACE2;
         stateStartTime = now;
-        gfx->fillScreen(BG_COLOR);
         drawSprite(SPR_SCARED, 0, 0);
       } else if (scaredPhase == SCARED_PHASE_FACE2 && now - stateStartTime >= SCARED_FACE_2_DURATION) {
         scaredPhase    = SCARED_PHASE_SAD;
         stateStartTime = now;
         currentSprite  = SPR_SAD;
-        gfx->fillScreen(BG_COLOR);
         drawSprite(SPR_SAD, 0, 0);
       } else if (scaredPhase == SCARED_PHASE_SAD && now - stateStartTime >= SCARED_SAD_DURATION) {
         returnToNormal();
@@ -644,7 +752,6 @@ void loop() {
     if (now - stateStartTime >= REACTION_TEXT_DURATION) {
       currentMode     = FACE_HOLD;
       stateStartTime  = now;
-      gfx->fillScreen(BG_COLOR);
       drawSprite(currentSprite, 0, 0);
       lastFloatOffset = 0;
       lastFloatDraw   = now;

@@ -73,6 +73,8 @@ enum Mode {
   TEXT_SLEEP,
   FACE_GLITCH,
   FACE_JUMP,
+  FACE_WALK,
+  FACE_WAVE,
 };
 
 Mode currentMode  = FACE_NORMAL;
@@ -151,8 +153,8 @@ const float FLOAT_AMPLITUDE        = 7.0;
 const float FLOAT_SPEED            = 0.0006;
 
 // Jump animation
-#define JUMP_FRAME_COUNT   11
-#define JUMP_FRAME_MS      0   // 42ms ≈ 24fps
+#define JUMP_FRAME_COUNT   21
+#define JUMP_FRAME_MS      42   // 42ms ≈ 24fps
 const unsigned long HOLD_MIN = 2000;
 const unsigned long HOLD_MAX = 5000;
 
@@ -161,7 +163,25 @@ unsigned long lastJumpFrame = 0;
 unsigned long touchDownTime = 0;
 bool touchHeld              = false;
 
-// Single reusable PSRAM frame buffer for all SD animation streaming
+// Walk animation
+#define WALK_FRAME_COUNT  8
+#define WALK_FRAME_MS     42   // 24fps
+int walkFrameIndex          = 0;
+unsigned long lastWalkFrame = 0;
+
+// Wave animation (random idle, every 10-45 min)
+const int waveSequence[]        = {1,2,3,4,3,2,3,4,3,2,3,4,3,2,1};
+#define WAVE_SEQUENCE_LENGTH    15
+#define WAVE_FRAME_MS           42   // 24fps
+int waveFrameIndex              = 0;
+unsigned long lastWaveFrame     = 0;
+unsigned long nextWaveTime      = 0;
+
+// PWR button (GPIO 0)
+#define PWR_BUTTON_PIN 0
+bool pwrButtonPrev          = HIGH;
+unsigned long pwrDebounce   = 0;
+const unsigned long PWR_DEBOUNCE_MS = 50;
 // One frame at a time — decode into here, blast to display, reuse
 uint16_t* frameBuffer = nullptr;
 
@@ -302,10 +322,100 @@ void drawJumpFrame(int frameIndex) {
   int drawX = (SCREEN_W - imgWidth) / 2;
   int drawY = SCREEN_H - imgHeight - 20;
 
-  
   gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
   Serial.print("Frame "); Serial.print(frameIndex + 1);
   Serial.print(" "); Serial.print(millis() - t); Serial.println("ms");
+}
+
+// ─── DRAW WALK FRAME (streamed from SD into PSRAM buffer) ────────────────────
+void drawWalkFrame(int frameIndex) {
+  if (!frameBuffer) return;
+
+  char filename[16];
+  snprintf(filename, sizeof(filename), "/walk%d.bmp", frameIndex + 1);
+
+  File file = SD_MMC.open(filename);
+  if (!file) {
+    Serial.print("Walk frame missing: "); Serial.println(filename);
+    return;
+  }
+  if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
+  file.seek(10);
+  uint32_t pixelOffset = 0;
+  file.read((uint8_t*)&pixelOffset, 4);
+  file.seek(18);
+  int32_t imgWidth = 0, imgHeight = 0;
+  file.read((uint8_t*)&imgWidth, 4);
+  file.read((uint8_t*)&imgHeight, 4);
+  bool flipped = imgHeight > 0;
+  if (imgHeight < 0) imgHeight = -imgHeight;
+
+  uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
+  uint8_t rowBuf[rowSize];
+  file.seek(pixelOffset);
+
+  for (int row = 0; row < imgHeight; row++) {
+    file.read(rowBuf, rowSize);
+    int destRow = flipped ? (imgHeight - 1 - row) : row;
+    uint16_t* dst = frameBuffer + destRow * imgWidth;
+    for (int col = 0; col < imgWidth; col++) {
+      uint8_t b = rowBuf[col * 3];
+      uint8_t g = rowBuf[col * 3 + 1];
+      uint8_t r = rowBuf[col * 3 + 2];
+      dst[col] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    }
+  }
+  file.close();
+
+  int drawX = (SCREEN_W - imgWidth) / 2;
+  int drawY = SCREEN_H - imgHeight - 20;
+
+  gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
+}
+
+// ─── DRAW WAVE FRAME (streamed from SD into PSRAM buffer) ────────────────────
+void drawWaveFrame(int fileIndex) {
+  if (!frameBuffer) return;
+
+  char filename[16];
+  snprintf(filename, sizeof(filename), "/wave%d.bmp", fileIndex);
+
+  File file = SD_MMC.open(filename);
+  if (!file) {
+    Serial.print("Wave frame missing: "); Serial.println(filename);
+    return;
+  }
+  if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
+  file.seek(10);
+  uint32_t pixelOffset = 0;
+  file.read((uint8_t*)&pixelOffset, 4);
+  file.seek(18);
+  int32_t imgWidth = 0, imgHeight = 0;
+  file.read((uint8_t*)&imgWidth, 4);
+  file.read((uint8_t*)&imgHeight, 4);
+  bool flipped = imgHeight > 0;
+  if (imgHeight < 0) imgHeight = -imgHeight;
+
+  uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
+  uint8_t rowBuf[rowSize];
+  file.seek(pixelOffset);
+
+  for (int row = 0; row < imgHeight; row++) {
+    file.read(rowBuf, rowSize);
+    int destRow = flipped ? (imgHeight - 1 - row) : row;
+    uint16_t* dst = frameBuffer + destRow * imgWidth;
+    for (int col = 0; col < imgWidth; col++) {
+      uint8_t b = rowBuf[col * 3];
+      uint8_t g = rowBuf[col * 3 + 1];
+      uint8_t r = rowBuf[col * 3 + 2];
+      dst[col] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    }
+  }
+  file.close();
+
+  int drawX = (SCREEN_W - imgWidth) / 2;
+  int drawY = SCREEN_H - imgHeight - 20;
+  gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
 }
 
 // ─── TEXT SCREENS ─────────────────────────────────────────────────────────────
@@ -401,6 +511,14 @@ void drawGlitchFrame() {
 }
 
 // ─── RANDOM EVENT SCHEDULING ──────────────────────────────────────────────────
+void scheduleNextWave() {
+  // Fire wave randomly between 10 and 45 minutes from now
+  nextWaveTime = millis() + (10UL * 60 * 1000) + random(35UL * 60 * 1000);
+  Serial.print("Next wave in ");
+  Serial.print((nextWaveTime - millis()) / 60000);
+  Serial.println(" minutes");
+}
+
 void scheduleNextDisgust() {
   nextDisgustTime = millis() + (5UL * 60 * 1000) + random(25UL * 60 * 1000);
   Serial.print("Next disgust in ");
@@ -435,7 +553,6 @@ void triggerReaction(Reaction r) {
     scaredPhase   = SCARED_PHASE_FACE1;
     Serial.println("Reaction: SCARED");
   }
-  
   drawSprite(currentSprite, 0, 0);
   lastFloatOffset = 0;
 }
@@ -452,7 +569,6 @@ void returnToNormal() {
   lastActivityTime = millis();
   lastFloatOffset  = 0;
   gfx->setBrightness(AWAKE_BRIGHTNESS);
-  
   drawSprite(SPR_NORMAL, 0, 0);
   Serial.println("Returned to normal");
 }
@@ -503,6 +619,7 @@ void preloadSprites() {
 void setup() {
   Serial.begin(115200);
   Wire.begin(IIC_SDA, IIC_SCL);
+  pinMode(PWR_BUTTON_PIN, INPUT_PULLUP);
 
   touch.setPins(TP_RESET, TP_INT);
   if (!touch.begin(Wire, 0x5A, IIC_SDA, IIC_SCL)) {
@@ -541,6 +658,7 @@ void setup() {
 
   scheduleNextDisgust();
   scheduleNextGlitch();
+  scheduleNextWave();
 
   // Allocate reusable animation frame buffer in PSRAM
   frameBuffer = (uint16_t*)ps_malloc(466 * 466 * 2);
@@ -556,6 +674,22 @@ void setup() {
 // ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 void loop() {
   unsigned long now = millis();
+
+  // ── PWR BUTTON (GPIO 0) — toggle walk mode ──
+  bool pwrButton = digitalRead(PWR_BUTTON_PIN);
+  if (pwrButton == LOW && pwrButtonPrev == HIGH && (now - pwrDebounce > PWR_DEBOUNCE_MS)) {
+    pwrDebounce   = now;
+    if (currentMode == FACE_NORMAL) {
+      currentMode    = FACE_WALK;
+      walkFrameIndex = 0;
+      lastWalkFrame  = now;
+      Serial.println("Walk mode ON");
+    } else if (currentMode == FACE_WALK) {
+      returnToNormal();
+      Serial.println("Walk mode OFF");
+    }
+  }
+  pwrButtonPrev = pwrButton;
 
   if (touchInterrupt) {
     touchInterrupt = false;
@@ -646,12 +780,19 @@ void loop() {
       Serial.println(glitchType == 0 ? "rainbow" : "terminal");
       return;
     }
+    if (now >= nextWaveTime) {
+      scheduleNextWave();
+      currentMode    = FACE_WAVE;
+      waveFrameIndex = 0;
+      lastWaveFrame  = now;
+      Serial.println("Wave triggered!");
+      return;
+    }
   }
 
   if (currentMode == FACE_GLITCH) {
     if (glitchType == 0) {
       if (now - glitchStartTime >= GLITCH_DURATION) {
-        gfx->fillScreen(BG_COLOR);
         drawSprite(SPR_NORMAL, lastFloatOffset, lastFloatOffset);
         currentMode = FACE_NORMAL;
         Serial.println("Glitch ended");
@@ -674,7 +815,6 @@ void loop() {
         }
       } else {
         if (now - terminalDoneTime >= TERMINAL_HOLD) {
-          gfx->fillScreen(BG_COLOR);
           drawSprite(SPR_NORMAL, lastFloatOffset, lastFloatOffset);
           currentMode = FACE_NORMAL;
           Serial.println("Glitch ended");
@@ -692,6 +832,28 @@ void loop() {
       if (jumpFrameIndex >= JUMP_FRAME_COUNT) {
         returnToNormal();
         Serial.println("Jump complete");
+      }
+    }
+    return;
+  }
+
+  if (currentMode == FACE_WALK) {
+    if (now - lastWalkFrame >= WALK_FRAME_MS) {
+      drawWalkFrame(walkFrameIndex);
+      lastWalkFrame  = now;
+      walkFrameIndex = (walkFrameIndex + 1) % WALK_FRAME_COUNT; // loop continuously
+    }
+    return;
+  }
+
+  if (currentMode == FACE_WAVE) {
+    if (now - lastWaveFrame >= WAVE_FRAME_MS) {
+      drawWaveFrame(waveSequence[waveFrameIndex]);
+      lastWaveFrame = now;
+      waveFrameIndex++;
+      if (waveFrameIndex >= WAVE_SEQUENCE_LENGTH) {
+        returnToNormal();
+        Serial.println("Wave complete");
       }
     }
     return;

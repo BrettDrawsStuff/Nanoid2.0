@@ -7,6 +7,9 @@
 #include <math.h>
 #include "TouchDrvCSTXXX.hpp"
 #include "SensorQMI8658.hpp"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <time.h>
 
 // ─── DISPLAY SETUP ────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -30,6 +33,19 @@ unsigned long lastShakeTime        = 0;
 
 // ─── BACKGROUND COLOR ─────────────────────────────────────────────────────────
 #define BG_COLOR 0x31A8
+
+// ─── WIFI & NTP ───────────────────────────────────────────────────────────────
+// Credentials are loaded from /wifi.cfg on the SD card — never hardcoded.
+// File format (two lines, no quotes):
+//   SSID
+//   password
+WebServer webServer(80);
+bool wifiConnected  = false;
+bool timesynced     = false;
+
+// Mountain Time: UTC-7 MDT / UTC-6 MST — handled automatically via POSIX tz string
+#define NTP_SERVER    "pool.ntp.org"
+#define TZ_STRING     "MST7MDT,M3.2.0,M11.1.0"  // auto DST for Mountain Time
 
 // ─── SPRITE DEFINITIONS ───────────────────────────────────────────────────────
 #define SPRITE_COUNT 8
@@ -153,7 +169,7 @@ const float FLOAT_AMPLITUDE        = 7.0;
 const float FLOAT_SPEED            = 0.0006;
 
 // Jump animation
-#define JUMP_FRAME_COUNT   21
+#define JUMP_FRAME_COUNT   11
 #define JUMP_FRAME_MS      42   // 42ms ≈ 24fps
 const unsigned long HOLD_MIN = 2000;
 const unsigned long HOLD_MAX = 5000;
@@ -615,6 +631,118 @@ void preloadSprites() {
   Serial.println("KB");
 }
 
+// ─── WIFI: LOAD CREDENTIALS FROM SD ──────────────────────────────────────────
+// Reads /wifi.cfg — line 1 = SSID, line 2 = password
+bool loadWifiConfig(char* ssid, char* password, int maxLen) {
+  File f = SD_MMC.open("/wifi.cfg");
+  if (!f) {
+    Serial.println("wifi.cfg not found on SD — skipping WiFi");
+    return false;
+  }
+  String s = f.readStringUntil('\n'); s.trim();
+  String p = f.readStringUntil('\n'); p.trim();
+  f.close();
+  if (s.length() == 0 || p.length() == 0) {
+    Serial.println("wifi.cfg empty or malformed — skipping WiFi");
+    return false;
+  }
+  s.toCharArray(ssid,     maxLen);
+  p.toCharArray(password, maxLen);
+  return true;
+}
+
+// ─── WIFI: CONNECT + NTP SYNC ─────────────────────────────────────────────────
+void initWifi() {
+  char ssid[64]     = {0};
+  char password[64] = {0};
+
+  if (!loadWifiConfig(ssid, password, 64)) return;
+
+  Serial.print("Connecting to WiFi: "); Serial.println(ssid);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+    delay(200);
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection timed out — continuing offline");
+    WiFi.disconnect(true);
+    return;
+  }
+
+  wifiConnected = true;
+  Serial.print("WiFi connected. IP: "); Serial.println(WiFi.localIP());
+
+  // Sync time via NTP
+  configTzTime(TZ_STRING, NTP_SERVER);
+  Serial.print("Syncing NTP time");
+  unsigned long ntpStart = millis();
+  struct tm ti;
+  while (!getLocalTime(&ti) && millis() - ntpStart < 8000) {
+    Serial.print(".");
+    delay(500);
+  }
+  if (getLocalTime(&ti)) {
+    timesynced = true;
+    Serial.printf("\nTime synced: %02d:%02d:%02d\n", ti.tm_hour, ti.tm_min, ti.tm_sec);
+  } else {
+    Serial.println("\nNTP sync failed — time unavailable");
+  }
+}
+
+// ─── WIFI: GET CURRENT TIME ───────────────────────────────────────────────────
+// Returns false if time not yet synced. Fills a tm struct for callers.
+bool getTimeInfo(struct tm* ti) {
+  if (!timesynced) return false;
+  return getLocalTime(ti);
+}
+
+// Convenience: returns hour (0-23), or -1 if unavailable
+int getCurrentHour() {
+  struct tm ti;
+  if (!getTimeInfo(&ti)) return -1;
+  return ti.tm_hour;
+}
+
+// ─── WEB SERVER: ROUTES ───────────────────────────────────────────────────────
+void handleRoot() {
+  struct tm ti;
+  bool hasTime = getLocalTime(&ti);
+
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='utf-8'>";
+  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Nanoid</title>";
+  html += "<style>body{background:#1a1a2e;color:#e0e0e0;font-family:monospace;padding:2em;}";
+  html += "h1{color:#7fff7f;}span.dim{color:#888;}.box{border:1px solid #444;padding:1em;margin:1em 0;border-radius:6px;}</style>";
+  html += "</head><body>";
+  html += "<h1>// NANOID v2.0</h1>";
+  html += "<div class='box'>";
+  if (hasTime) {
+    html += "<p>&#128336; <b>";
+    html += String(ti.tm_hour) + ":" + (ti.tm_min < 10 ? "0" : "") + String(ti.tm_min);
+    html += "</b> <span class='dim'>Mountain Time</span></p>";
+  } else {
+    html += "<p><span class='dim'>time not synced</span></p>";
+  }
+  html += "<p>&#128246; IP: " + WiFi.localIP().toString() + "</p>";
+  html += "</div>";
+  html += "<div class='box'><p><span class='dim'>more controls coming soon...</span></p></div>";
+  html += "</body></html>";
+
+  webServer.send(200, "text/html", html);
+}
+
+void initWebServer() {
+  if (!wifiConnected) return;
+  webServer.on("/", handleRoot);
+  webServer.begin();
+  Serial.println("Web server started");
+}
+
 // ─── SETUP ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -643,6 +771,10 @@ void setup() {
   } else {
     Serial.println("SD card mounted.");
   }
+
+  // WiFi — loads credentials from /wifi.cfg on SD, connects silently
+  initWifi();
+  initWebServer();
 
   if (!gfx->begin()) {
     Serial.println("Display init failed!");
@@ -675,14 +807,18 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  // ── Web server — handle any incoming requests ──
+  if (wifiConnected) webServer.handleClient();
+
   // ── PWR BUTTON (GPIO 0) — toggle walk mode ──
   bool pwrButton = digitalRead(PWR_BUTTON_PIN);
   if (pwrButton == LOW && pwrButtonPrev == HIGH && (now - pwrDebounce > PWR_DEBOUNCE_MS)) {
     pwrDebounce   = now;
     if (currentMode == FACE_NORMAL) {
-      currentMode    = FACE_WALK;
-      walkFrameIndex = 0;
-      lastWalkFrame  = now;
+      currentMode      = FACE_WALK;
+      walkFrameIndex   = 0;
+      lastWalkFrame    = now;
+      lastActivityTime = now;
       Serial.println("Walk mode ON");
     } else if (currentMode == FACE_WALK) {
       returnToNormal();
@@ -753,7 +889,7 @@ void loop() {
   }
 
   if (currentMode == FACE_NORMAL || currentMode == FACE_SAD) {
-    unsigned long inactive = now - lastActivityTime;
+    unsigned long inactive = millis() - lastActivityTime;
     if (inactive >= SLEEP_TIMEOUT && currentMode != FACE_SLEEP) {
       enterSleepMode(); return;
     } else if (inactive >= SAD_TIMEOUT && currentMode == FACE_NORMAL) {
@@ -793,6 +929,7 @@ void loop() {
   if (currentMode == FACE_GLITCH) {
     if (glitchType == 0) {
       if (now - glitchStartTime >= GLITCH_DURATION) {
+        gfx->fillScreen(BG_COLOR);
         drawSprite(SPR_NORMAL, lastFloatOffset, lastFloatOffset);
         currentMode = FACE_NORMAL;
         Serial.println("Glitch ended");
@@ -815,6 +952,7 @@ void loop() {
         }
       } else {
         if (now - terminalDoneTime >= TERMINAL_HOLD) {
+          gfx->fillScreen(BG_COLOR);
           drawSprite(SPR_NORMAL, lastFloatOffset, lastFloatOffset);
           currentMode = FACE_NORMAL;
           Serial.println("Glitch ended");
@@ -838,10 +976,11 @@ void loop() {
   }
 
   if (currentMode == FACE_WALK) {
+    lastActivityTime = now;  // stay awake while walking
     if (now - lastWalkFrame >= WALK_FRAME_MS) {
       drawWalkFrame(walkFrameIndex);
       lastWalkFrame  = now;
-      walkFrameIndex = (walkFrameIndex + 1) % WALK_FRAME_COUNT; // loop continuously
+      walkFrameIndex = (walkFrameIndex + 1) % WALK_FRAME_COUNT;
     }
     return;
   }

@@ -9,6 +9,7 @@
 #include "SensorQMI8658.hpp"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WiFiClientSecure.h>
 #include <time.h>
 
 // ─── DISPLAY SETUP ────────────────────────────────────────────────────────────
@@ -35,48 +36,119 @@ unsigned long lastShakeTime        = 0;
 #define BG_COLOR 0x31A8
 
 // ─── WIFI & NTP ───────────────────────────────────────────────────────────────
-// Credentials are loaded from /wifi.cfg on the SD card — never hardcoded.
-// File format (two lines, no quotes):
-//   SSID
-//   password
+// Credentials loaded from /wifi.cfg on SD (line 1 = SSID, line 2 = password)
 WebServer webServer(80);
-bool wifiConnected  = false;
-bool timesynced     = false;
+bool wifiConnected = false;
+bool timesynced    = false;
 
-// Mountain Time: UTC-7 MDT / UTC-6 MST — handled automatically via POSIX tz string
-#define NTP_SERVER    "pool.ntp.org"
-#define TZ_STRING     "MST7MDT,M3.2.0,M11.1.0"  // auto DST for Mountain Time
+#define NTP_SERVER "pool.ntp.org"
+#define TZ_STRING  "MST7MDT,M3.2.0,M11.1.0"
 
-// ─── SPRITE DEFINITIONS ───────────────────────────────────────────────────────
-#define SPRITE_COUNT 8
+// ─── LOCATION & WEATHER ───────────────────────────────────────────────────────
+// Coordinates loaded from /location.cfg on SD (line 1 = lat, line 2 = lon)
+float locationLat      = 0.0;
+float locationLon      = 0.0;
+bool  locationLoaded   = false;
 
-const char* spriteFiles[SPRITE_COUNT] = {
-  "/normal.bmp",
-  "/normal_blink.bmp",
-  "/happy.bmp",
-  "/sad.bmp",
-  "/mad.bmp",
-  "/scared.bmp",
-  "/disgust.bmp",
-  "/confused.bmp"
+float weatherTempF         = -999.0; // -999 = not yet fetched
+int   weatherCode          = -1;     // WMO code, -1 = unknown
+unsigned long lastWeatherFetch = 0;
+const unsigned long WEATHER_INTERVAL = 2UL * 60 * 60 * 1000;
+
+#define TEMP_HOT  80.0
+#define TEMP_COLD 60.0
+
+#define HOUR_MORNING_START 5
+#define HOUR_MORNING_END   11
+#define HOUR_NIGHT_START   21
+
+// ─── SPRITE FILENAMES ─────────────────────────────────────────────────────────
+// All sprites stream from SD. Nothing is preloaded into PSRAM.
+// The frameBuffer holds the currently displayed sprite between redraws.
+
+#define SPR_NORMAL             0
+#define SPR_BLINK              1
+#define SPR_HAPPY              2
+#define SPR_SAD                3
+#define SPR_MAD                4
+#define SPR_SCARED             5
+#define SPR_DISGUST            6
+#define SPR_CONFUSED           7
+#define SPR_MORNING            8
+#define SPR_MORNING_BLINK      9
+#define SPR_NIGHT              10
+#define SPR_NIGHT_BLINK        11
+#define SPR_RAIN               12
+#define SPR_RAIN_BLINK         13
+#define SPR_RAIN_MORNING       14
+#define SPR_RAIN_MORNING_BLINK 15
+#define SPR_RAIN_NIGHT         16
+#define SPR_RAIN_NIGHT_BLINK   17
+#define SPR_SNOW               18
+#define SPR_SNOW_BLINK         19
+#define SPR_SNOW_MORNING       20
+#define SPR_SNOW_MORNING_BLINK 21
+#define SPR_SNOW_NIGHT         22
+#define SPR_SNOW_NIGHT_BLINK   23
+#define SPR_COLD               24
+#define SPR_COLD_BLINK         25
+#define SPR_COLD_MORNING       26
+#define SPR_COLD_MORNING_BLINK 27
+#define SPR_COLD_NIGHT         28
+#define SPR_COLD_NIGHT_BLINK   29
+#define SPR_HOT                30
+#define SPR_HOT_BLINK          31
+#define SPR_HOT_MORNING        32
+#define SPR_HOT_MORNING_BLINK  33
+#define SPR_HOT_NIGHT          34
+#define SPR_HOT_NIGHT_BLINK    35
+#define SPR_COUNT              36
+
+const char* spriteFiles[SPR_COUNT] = {
+  "/normal.bmp",           // 0
+  "/normal_blink.bmp",     // 1
+  "/happy.bmp",            // 2
+  "/sad.bmp",              // 3
+  "/mad.bmp",              // 4
+  "/scared.bmp",           // 5
+  "/disgust.bmp",          // 6
+  "/confused.bmp",         // 7
+  "/morning.bmp",          // 8
+  "/morning_blink.bmp",    // 9
+  "/night.bmp",            // 10
+  "/night_blink.bmp",      // 11
+  "/rain.bmp",             // 12
+  "/rain_blink.bmp",       // 13
+  "/rainmorning.bmp",      // 14
+  "/rainmorning_blink.bmp",// 15
+  "/rainnight.bmp",        // 16
+  "/rainnight_blink.bmp",  // 17
+  "/snow.bmp",             // 18
+  "/snow_blink.bmp",       // 19
+  "/snowmorning.bmp",      // 20
+  "/snowmorning_blink.bmp",// 21
+  "/snownight.bmp",        // 22
+  "/snownight_blink.bmp",  // 23
+  "/cold.bmp",             // 24
+  "/cold_blink.bmp",       // 25
+  "/coldmorning.bmp",      // 26
+  "/coldmorning_blink.bmp",// 27
+  "/coldnight.bmp",        // 28
+  "/coldnight_blink.bmp",  // 29
+  "/hot.bmp",              // 30
+  "/hot_blink.bmp",        // 31
+  "/hotmorning.bmp",       // 32
+  "/hotmorning_blink.bmp", // 33
+  "/hotnight.bmp",         // 34
+  "/hotnight_blink.bmp",   // 35
 };
 
-#define SPR_NORMAL    0
-#define SPR_BLINK     1
-#define SPR_HAPPY     2
-#define SPR_SAD       3
-#define SPR_MAD       4
-#define SPR_SCARED    5
-#define SPR_DISGUST   6
-#define SPR_CONFUSED  7
-
-struct Sprite {
-  uint16_t* rgb;
-  int width;
-  int height;
-};
-
-Sprite sprites[SPRITE_COUNT];
+// ─── FRAME BUFFER ─────────────────────────────────────────────────────────────
+// Single PSRAM buffer for all drawing. Cached sprite redraws blit from here.
+uint16_t* frameBuffer    = nullptr;
+int cachedSpriteIndex    = -1;
+int cachedSpriteW        = 0;
+int cachedSpriteH        = 0;
 
 // ─── STATE MACHINE ────────────────────────────────────────────────────────────
 enum Mode {
@@ -153,15 +225,14 @@ ScaredPhase scaredPhase = SCARED_PHASE_FACE1;
 const unsigned long SAD_TIMEOUT   = 5UL  * 60 * 1000;
 const unsigned long SLEEP_TIMEOUT = 15UL * 60 * 1000;
 
-const unsigned long ZZZ_INTERVAL    = 60000;
-const unsigned long ZZZ_DURATION    = 4000;
+const unsigned long ZZZ_INTERVAL     = 60000;
+const unsigned long ZZZ_DURATION     = 4000;
 const uint8_t       SLEEP_BRIGHTNESS = 75;
 const uint8_t       AWAKE_BRIGHTNESS = 150;
 
-const unsigned long GLITCH_DURATION      = 2000;
-const unsigned long GLITCH_FRAME_RATE    = 16;
-const unsigned long TERMINAL_HOLD        = 2000;
-const unsigned long TERMINAL_GLITCH_TIME = 1000;
+const unsigned long GLITCH_DURATION   = 2000;
+const unsigned long GLITCH_FRAME_RATE = 16;
+const unsigned long TERMINAL_HOLD     = 2000;
 
 // Float animation
 const unsigned long FLOAT_INTERVAL = 19;
@@ -169,37 +240,32 @@ const float FLOAT_AMPLITUDE        = 7.0;
 const float FLOAT_SPEED            = 0.0006;
 
 // Jump animation
-#define JUMP_FRAME_COUNT   11
-#define JUMP_FRAME_MS      42   // 42ms ≈ 24fps
-const unsigned long HOLD_MIN = 2000;
-const unsigned long HOLD_MAX = 5000;
-
+#define JUMP_FRAME_COUNT 11
+#define JUMP_FRAME_MS    42
 int jumpFrameIndex          = 0;
 unsigned long lastJumpFrame = 0;
 unsigned long touchDownTime = 0;
 bool touchHeld              = false;
 
 // Walk animation
-#define WALK_FRAME_COUNT  8
-#define WALK_FRAME_MS     42   // 24fps
+#define WALK_FRAME_COUNT 8
+#define WALK_FRAME_MS    42
 int walkFrameIndex          = 0;
 unsigned long lastWalkFrame = 0;
 
-// Wave animation (random idle, every 10-45 min)
-const int waveSequence[]        = {1,2,3,4,3,2,3,4,3,2,3,4,3,2,1};
-#define WAVE_SEQUENCE_LENGTH    15
-#define WAVE_FRAME_MS           42   // 24fps
-int waveFrameIndex              = 0;
-unsigned long lastWaveFrame     = 0;
-unsigned long nextWaveTime      = 0;
+// Wave animation
+const int waveSequence[]     = {1,2,3,4,3,2,3,4,3,2,3,4,3,2,1};
+#define WAVE_SEQUENCE_LENGTH 15
+#define WAVE_FRAME_MS        42
+int waveFrameIndex           = 0;
+unsigned long lastWaveFrame  = 0;
+unsigned long nextWaveTime   = 0;
 
-// PWR button (GPIO 0)
+// PWR button (GPIO 0) — toggles walk mode
 #define PWR_BUTTON_PIN 0
-bool pwrButtonPrev          = HIGH;
-unsigned long pwrDebounce   = 0;
+bool pwrButtonPrev              = HIGH;
+unsigned long pwrDebounce       = 0;
 const unsigned long PWR_DEBOUNCE_MS = 50;
-// One frame at a time — decode into here, blast to display, reuse
-uint16_t* frameBuffer = nullptr;
 
 // ─── TAP DETECTION ────────────────────────────────────────────────────────────
 int tapCount                 = 0;
@@ -220,90 +286,69 @@ void IRAM_ATTR onTouchInterrupt() {
   touchInterrupt = true;
 }
 
-// ─── BMP LOADER ───────────────────────────────────────────────────────────────
-bool loadBMP(const char* filename, Sprite& sprite) {
-  File file = SD_MMC.open(filename);
-  if (!file) {
-    Serial.print("Failed to open: "); Serial.println(filename);
-    return false;
-  }
-  if (file.read() != 'B' || file.read() != 'M') {
-    Serial.println("Not a BMP file");
-    file.close();
-    return false;
-  }
-  file.seek(10);
-  uint32_t pixelOffset = 0;
-  file.read((uint8_t*)&pixelOffset, 4);
-  file.seek(18);
-  int32_t imgWidth = 0, imgHeight = 0;
-  file.read((uint8_t*)&imgWidth, 4);
-  file.read((uint8_t*)&imgHeight, 4);
-  bool flipped = imgHeight > 0;
-  if (imgHeight < 0) imgHeight = -imgHeight;
-  sprite.width  = imgWidth;
-  sprite.height = imgHeight;
-  sprite.rgb = (uint16_t*)ps_malloc(imgWidth * imgHeight * 2);
-  if (!sprite.rgb) {
-    Serial.print("PSRAM alloc failed: "); Serial.println(filename);
-    file.close();
-    return false;
-  }
-  uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
-  uint8_t rowBuffer[rowSize];
-  file.seek(pixelOffset);
-  for (int row = 0; row < imgHeight; row++) {
-    file.read(rowBuffer, rowSize);
-    int destRow = flipped ? (imgHeight - 1 - row) : row;
-    for (int col = 0; col < imgWidth; col++) {
-      uint8_t b = rowBuffer[col * 3];
-      uint8_t g = rowBuffer[col * 3 + 1];
-      uint8_t r = rowBuffer[col * 3 + 2];
-      sprite.rgb[destRow * imgWidth + col] =
-        ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+// ─── drawBMP ──────────────────────────────────────────────────────────────────
+// Loads a sprite by index from SD into frameBuffer (cached — only re-reads SD
+// when spriteIndex changes or forceReload=true). Blits to display with float
+// offset delta correction so only the shifted gap strip is filled with BG_COLOR.
+void drawBMP(int spriteIndex, int floatOffset, int prevOffset, bool forceReload = false) {
+  if (!frameBuffer) return;
+  if (spriteIndex < 0 || spriteIndex >= SPR_COUNT) return;
+
+  if (forceReload || spriteIndex != cachedSpriteIndex) {
+    const char* filename = spriteFiles[spriteIndex];
+    File file = SD_MMC.open(filename);
+    if (!file) {
+      Serial.print("Missing: "); Serial.println(filename);
+      return;
     }
+    if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
+    file.seek(10);
+    uint32_t pixelOffset = 0;
+    file.read((uint8_t*)&pixelOffset, 4);
+    file.seek(18);
+    int32_t imgWidth = 0, imgHeight = 0;
+    file.read((uint8_t*)&imgWidth, 4);
+    file.read((uint8_t*)&imgHeight, 4);
+    bool flipped = imgHeight > 0;
+    if (imgHeight < 0) imgHeight = -imgHeight;
+    uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
+    uint8_t rowBuf[rowSize];
+    file.seek(pixelOffset);
+    for (int row = 0; row < imgHeight; row++) {
+      file.read(rowBuf, rowSize);
+      int destRow = flipped ? (imgHeight - 1 - row) : row;
+      uint16_t* dst = frameBuffer + destRow * imgWidth;
+      for (int col = 0; col < imgWidth; col++) {
+        uint8_t b = rowBuf[col * 3];
+        uint8_t g = rowBuf[col * 3 + 1];
+        uint8_t r = rowBuf[col * 3 + 2];
+        dst[col] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+      }
+    }
+    file.close();
+    cachedSpriteIndex = spriteIndex;
+    cachedSpriteW     = imgWidth;
+    cachedSpriteH     = imgHeight;
   }
-  file.close();
-  Serial.print("Loaded: "); Serial.println(filename);
-  return true;
-}
 
-// ─── DRAW SPRITE ──────────────────────────────────────────────────────────────
-#define ROWS_PER_CHUNK 8
-
-void drawSprite(int index, int floatOffset, int prevOffset) {
-  if (!sprites[index].rgb) return;
-  Sprite& s = sprites[index];
   if (floatOffset != prevOffset) {
     if (floatOffset > prevOffset) {
-      gfx->fillRect(0, prevOffset, s.width, floatOffset - prevOffset, BG_COLOR);
+      gfx->fillRect(0, prevOffset, cachedSpriteW, floatOffset - prevOffset, BG_COLOR);
     } else {
-      gfx->fillRect(0, s.height + floatOffset, s.width, prevOffset - floatOffset, BG_COLOR);
+      gfx->fillRect(0, cachedSpriteH + floatOffset, cachedSpriteW, prevOffset - floatOffset, BG_COLOR);
     }
   }
-  for (int startRow = 0; startRow < s.height; startRow += ROWS_PER_CHUNK) {
-    int endRow      = min(startRow + ROWS_PER_CHUNK, s.height);
-    int chunkHeight = endRow - startRow;
-    gfx->draw16bitRGBBitmap(
-      0, startRow + floatOffset,
-      &s.rgb[startRow * s.width],
-      s.width, chunkHeight
-    );
-  }
+  gfx->draw16bitRGBBitmap(0, floatOffset, frameBuffer, cachedSpriteW, cachedSpriteH);
 }
 
-// ─── DRAW JUMP FRAME (streamed from SD into PSRAM buffer) ────────────────────
-void drawJumpFrame(int frameIndex) {
+// ─── drawAnimFrame ────────────────────────────────────────────────────────────
+// Streams an animation frame from SD by filename. Always re-reads (no cache).
+// Invalidates the sprite cache since it overwrites frameBuffer.
+// Pass drawX=-1, drawY=-1 to center horizontally and dock to bottom.
+void drawAnimFrame(const char* filename, int drawX, int drawY) {
   if (!frameBuffer) return;
-
-  char filename[16];
-  snprintf(filename, sizeof(filename), "/jump%d.bmp", frameIndex + 1);
-
   File file = SD_MMC.open(filename);
-  if (!file) {
-    Serial.print("Jump frame missing: "); Serial.println(filename);
-    return;
-  }
+  if (!file) { Serial.print("Missing: "); Serial.println(filename); return; }
   if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
   file.seek(10);
   uint32_t pixelOffset = 0;
@@ -314,13 +359,9 @@ void drawJumpFrame(int frameIndex) {
   file.read((uint8_t*)&imgHeight, 4);
   bool flipped = imgHeight > 0;
   if (imgHeight < 0) imgHeight = -imgHeight;
-
   uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
   uint8_t rowBuf[rowSize];
   file.seek(pixelOffset);
-
-  unsigned long t = millis();
-
   for (int row = 0; row < imgHeight; row++) {
     file.read(rowBuf, rowSize);
     int destRow = flipped ? (imgHeight - 1 - row) : row;
@@ -333,104 +374,9 @@ void drawJumpFrame(int frameIndex) {
     }
   }
   file.close();
-
-  // Center horizontally, sit toward bottom to match character in normal.bmp
-  int drawX = (SCREEN_W - imgWidth) / 2;
-  int drawY = SCREEN_H - imgHeight - 20;
-
-  gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
-  Serial.print("Frame "); Serial.print(frameIndex + 1);
-  Serial.print(" "); Serial.print(millis() - t); Serial.println("ms");
-}
-
-// ─── DRAW WALK FRAME (streamed from SD into PSRAM buffer) ────────────────────
-void drawWalkFrame(int frameIndex) {
-  if (!frameBuffer) return;
-
-  char filename[16];
-  snprintf(filename, sizeof(filename), "/walk%d.bmp", frameIndex + 1);
-
-  File file = SD_MMC.open(filename);
-  if (!file) {
-    Serial.print("Walk frame missing: "); Serial.println(filename);
-    return;
-  }
-  if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
-  file.seek(10);
-  uint32_t pixelOffset = 0;
-  file.read((uint8_t*)&pixelOffset, 4);
-  file.seek(18);
-  int32_t imgWidth = 0, imgHeight = 0;
-  file.read((uint8_t*)&imgWidth, 4);
-  file.read((uint8_t*)&imgHeight, 4);
-  bool flipped = imgHeight > 0;
-  if (imgHeight < 0) imgHeight = -imgHeight;
-
-  uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
-  uint8_t rowBuf[rowSize];
-  file.seek(pixelOffset);
-
-  for (int row = 0; row < imgHeight; row++) {
-    file.read(rowBuf, rowSize);
-    int destRow = flipped ? (imgHeight - 1 - row) : row;
-    uint16_t* dst = frameBuffer + destRow * imgWidth;
-    for (int col = 0; col < imgWidth; col++) {
-      uint8_t b = rowBuf[col * 3];
-      uint8_t g = rowBuf[col * 3 + 1];
-      uint8_t r = rowBuf[col * 3 + 2];
-      dst[col] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-    }
-  }
-  file.close();
-
-  int drawX = (SCREEN_W - imgWidth) / 2;
-  int drawY = SCREEN_H - imgHeight - 20;
-
-  gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
-}
-
-// ─── DRAW WAVE FRAME (streamed from SD into PSRAM buffer) ────────────────────
-void drawWaveFrame(int fileIndex) {
-  if (!frameBuffer) return;
-
-  char filename[16];
-  snprintf(filename, sizeof(filename), "/wave%d.bmp", fileIndex);
-
-  File file = SD_MMC.open(filename);
-  if (!file) {
-    Serial.print("Wave frame missing: "); Serial.println(filename);
-    return;
-  }
-  if (file.read() != 'B' || file.read() != 'M') { file.close(); return; }
-  file.seek(10);
-  uint32_t pixelOffset = 0;
-  file.read((uint8_t*)&pixelOffset, 4);
-  file.seek(18);
-  int32_t imgWidth = 0, imgHeight = 0;
-  file.read((uint8_t*)&imgWidth, 4);
-  file.read((uint8_t*)&imgHeight, 4);
-  bool flipped = imgHeight > 0;
-  if (imgHeight < 0) imgHeight = -imgHeight;
-
-  uint32_t rowSize = ((imgWidth * 3 + 3) / 4) * 4;
-  uint8_t rowBuf[rowSize];
-  file.seek(pixelOffset);
-
-  for (int row = 0; row < imgHeight; row++) {
-    file.read(rowBuf, rowSize);
-    int destRow = flipped ? (imgHeight - 1 - row) : row;
-    uint16_t* dst = frameBuffer + destRow * imgWidth;
-    for (int col = 0; col < imgWidth; col++) {
-      uint8_t b = rowBuf[col * 3];
-      uint8_t g = rowBuf[col * 3 + 1];
-      uint8_t r = rowBuf[col * 3 + 2];
-      dst[col] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-    }
-  }
-  file.close();
-
-  int drawX = (SCREEN_W - imgWidth) / 2;
-  int drawY = SCREEN_H - imgHeight - 20;
+  cachedSpriteIndex = -1; // frameBuffer no longer holds a cached sprite
+  if (drawX < 0) drawX = (SCREEN_W - imgWidth) / 2;
+  if (drawY < 0) drawY = SCREEN_H - imgHeight - 20;
   gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
 }
 
@@ -445,9 +391,7 @@ void drawTextScreen(const char* message, int x, int y) {
 
 void drawTextCentered(const char* message) {
   int msgLen = strlen(message);
-  int x = SCREEN_CX - (msgLen * 12);
-  int y = SCREEN_CY - 20;
-  drawTextScreen(message, x, y);
+  drawTextScreen(message, SCREEN_CX - (msgLen * 12), SCREEN_CY - 20);
 }
 
 void drawUghText() {
@@ -462,9 +406,7 @@ void drawAhhhhText() {
   gfx->fillScreen(RGB565_BLACK);
   gfx->setTextColor(RGB565_WHITE);
   gfx->setTextSize(4, 4, 1);
-  int x = SCREEN_CX - (6 * 12);
-  int y = SCREEN_CY - 20;
-  gfx->setCursor(x, y);
+  gfx->setCursor(SCREEN_CX - (6 * 12), SCREEN_CY - 20);
   gfx->println("AHHHH!");
 }
 
@@ -476,51 +418,39 @@ void drawGlitchFrame() {
       0x001F, 0xF81F, 0xFFFF, 0xF8F0, 0xBBF7,
       0xFD20, 0x04FF, 0xAFE5, 0xFF80, 0x801F
     };
-    int numColors = 15;
     int y = 0;
     while (y < SCREEN_H) {
-      int h     = random(4, 28);
-      int shift = random(-50, 50);
-      uint16_t c = barColors[random(numColors)];
+      int h = random(4, 28), shift = random(-50, 50);
+      uint16_t c = barColors[random(15)];
       if (shift >= 0) {
         gfx->fillRect(shift, y, SCREEN_W - shift, h, c);
-        gfx->fillRect(0, y, shift, h, barColors[random(numColors)]);
+        gfx->fillRect(0, y, shift, h, barColors[random(15)]);
       } else {
         gfx->fillRect(0, y, SCREEN_W + shift, h, c);
-        gfx->fillRect(SCREEN_W + shift, y, -shift, h, barColors[random(numColors)]);
+        gfx->fillRect(SCREEN_W + shift, y, -shift, h, barColors[random(15)]);
       }
       y += h + random(0, 4);
     }
-    for (int i = 0; i < 20; i++)
-      gfx->fillRect(0, random(SCREEN_H), SCREEN_W, random(1, 3), random(0, 65535));
-    for (int i = 0; i < 5; i++)
-      gfx->fillRect(random(SCREEN_W), 0, random(2, 8), SCREEN_H, random(0, 65535));
-    for (int i = 0; i < 200; i++)
-      gfx->drawPixel(random(SCREEN_W), random(SCREEN_H), random(0, 65535));
+    for (int i = 0; i < 20; i++) gfx->fillRect(0, random(SCREEN_H), SCREEN_W, random(1, 3), random(0xFFFF));
+    for (int i = 0; i < 5;  i++) gfx->fillRect(random(SCREEN_W), 0, random(2, 8), SCREEN_H, random(0xFFFF));
+    for (int i = 0; i < 200; i++) gfx->drawPixel(random(SCREEN_W), random(SCREEN_H), random(0xFFFF));
   } else {
     if (terminalCharIndex == 0) gfx->fillScreen(0x0000);
     const char chars[] = "0123456789ABCDEF><@#!%^&*?/\\|~=+-_[]{}();:.,LOAD EXEC RUN ERROR MEMORY OVERFLOW ACCESS";
-    int charsLen = strlen(chars);
-    int charW = 12, charH = 16;
-    int cols  = SCREEN_W / charW;
-    int rows  = SCREEN_H / charH;
-    int total = cols * rows;
-    int charsPerFrame = max(2, total / 150);
-    for (int i = 0; i < charsPerFrame && terminalCharIndex < total; i++) {
-      int row = terminalCharIndex / cols;
-      int col = terminalCharIndex % cols;
-      char c  = chars[random(charsLen)];
-      uint16_t color;
+    int charsLen = strlen(chars), charW = 12, charH = 16;
+    int cols = SCREEN_W / charW, rows = SCREEN_H / charH;
+    int charsPerFrame = max(2, (cols * rows) / 150);
+    for (int i = 0; i < charsPerFrame && terminalCharIndex < cols * rows; i++) {
+      int row = terminalCharIndex / cols, col = terminalCharIndex % cols;
+      char c = chars[random(charsLen)];
       int r = random(10);
-      if (r == 0)      color = 0xFFFF;
-      else if (r <= 2) color = 0x0320;
-      else             color = 0x07E0;
+      uint16_t color = (r == 0) ? 0xFFFF : (r <= 2) ? 0x0320 : 0x07E0;
       gfx->setTextColor(color);
       gfx->setTextSize(2, 2, 0);
       gfx->setCursor(col * charW, row * charH);
       gfx->print(c);
       if (random(8) == 0)
-        gfx->fillRect(col * charW + random(-10, 10), row * charH, random(2, 8), 1, random(0, 65535));
+        gfx->fillRect(col * charW + random(-10, 10), row * charH, random(2, 8), 1, random(0xFFFF));
       terminalCharIndex++;
     }
   }
@@ -528,25 +458,68 @@ void drawGlitchFrame() {
 
 // ─── RANDOM EVENT SCHEDULING ──────────────────────────────────────────────────
 void scheduleNextWave() {
-  // Fire wave randomly between 10 and 45 minutes from now
   nextWaveTime = millis() + (10UL * 60 * 1000) + random(35UL * 60 * 1000);
-  Serial.print("Next wave in ");
-  Serial.print((nextWaveTime - millis()) / 60000);
-  Serial.println(" minutes");
+  Serial.printf("Next wave in %lum\n", (nextWaveTime - millis()) / 60000);
 }
-
 void scheduleNextDisgust() {
   nextDisgustTime = millis() + (5UL * 60 * 1000) + random(25UL * 60 * 1000);
-  Serial.print("Next disgust in ");
-  Serial.print((nextDisgustTime - millis()) / 60000);
-  Serial.println(" minutes");
+  Serial.printf("Next disgust in %lum\n", (nextDisgustTime - millis()) / 60000);
 }
-
 void scheduleNextGlitch() {
   nextGlitchTime = millis() + (2UL * 60 * 1000) + random(13UL * 60 * 1000);
-  Serial.print("Next glitch in ");
-  Serial.print((nextGlitchTime - millis()) / 60000);
-  Serial.println(" minutes");
+  Serial.printf("Next glitch in %lum\n", (nextGlitchTime - millis()) / 60000);
+}
+
+// ─── TIME HELPERS ─────────────────────────────────────────────────────────────
+bool getTimeInfo(struct tm* ti) {
+  if (!timesynced) return false;
+  return getLocalTime(ti);
+}
+
+int getCurrentHour() {
+  struct tm ti;
+  if (!getTimeInfo(&ti)) return -1;
+  return ti.tm_hour;
+}
+
+// ─── CONTEXT SPRITE ───────────────────────────────────────────────────────────
+int getContextSprite(bool wantBlink) {
+  int hour       = getCurrentHour();
+  bool isMorning = (hour >= 0) && (hour >= HOUR_MORNING_START && hour < HOUR_MORNING_END);
+  bool isNight   = (hour >= 0) && (hour >= HOUR_NIGHT_START   || hour < HOUR_MORNING_START);
+
+  bool hasWeather = (weatherTempF > -999.0);
+  bool isHot  = hasWeather && (weatherTempF >= TEMP_HOT);
+  bool isCold = hasWeather && (weatherTempF <= TEMP_COLD);
+  bool isRain = hasWeather && (
+    (weatherCode >= 51 && weatherCode <= 67) ||
+    (weatherCode >= 80 && weatherCode <= 82) ||
+    (weatherCode >= 95 && weatherCode <= 99));
+  bool isSnow = hasWeather && (weatherCode >= 71 && weatherCode <= 77);
+
+  if (isHot) {
+    if (isMorning) return wantBlink ? SPR_HOT_MORNING_BLINK  : SPR_HOT_MORNING;
+    if (isNight)   return wantBlink ? SPR_HOT_NIGHT_BLINK    : SPR_HOT_NIGHT;
+    return wantBlink ? SPR_HOT_BLINK : SPR_HOT;
+  }
+  if (isCold) {
+    if (isMorning) return wantBlink ? SPR_COLD_MORNING_BLINK : SPR_COLD_MORNING;
+    if (isNight)   return wantBlink ? SPR_COLD_NIGHT_BLINK   : SPR_COLD_NIGHT;
+    return wantBlink ? SPR_COLD_BLINK : SPR_COLD;
+  }
+  if (isSnow) {
+    if (isMorning) return wantBlink ? SPR_SNOW_MORNING_BLINK : SPR_SNOW_MORNING;
+    if (isNight)   return wantBlink ? SPR_SNOW_NIGHT_BLINK   : SPR_SNOW_NIGHT;
+    return wantBlink ? SPR_SNOW_BLINK : SPR_SNOW;
+  }
+  if (isRain) {
+    if (isMorning) return wantBlink ? SPR_RAIN_MORNING_BLINK : SPR_RAIN_MORNING;
+    if (isNight)   return wantBlink ? SPR_RAIN_NIGHT_BLINK   : SPR_RAIN_NIGHT;
+    return wantBlink ? SPR_RAIN_BLINK : SPR_RAIN;
+  }
+  if (isMorning) return wantBlink ? SPR_MORNING_BLINK : SPR_MORNING;
+  if (isNight)   return wantBlink ? SPR_NIGHT_BLINK   : SPR_NIGHT;
+  return wantBlink ? SPR_BLINK : SPR_NORMAL;
 }
 
 // ─── REACTION TRIGGER ─────────────────────────────────────────────────────────
@@ -555,21 +528,11 @@ void triggerReaction(Reaction r) {
   currentMode    = FACE_REACTION;
   stateStartTime = millis();
   isBlinking     = false;
-  if (r == REACTION_HAPPY) {
-    currentSprite = SPR_HAPPY;
-    Serial.println("Reaction: HAPPY");
-  } else if (r == REACTION_MAD) {
-    currentSprite = SPR_MAD;
-    Serial.println("Reaction: MAD");
-  } else if (r == REACTION_DISGUST) {
-    currentSprite = SPR_DISGUST;
-    Serial.println("Reaction: DISGUST");
-  } else if (r == REACTION_SCARED) {
-    currentSprite = SPR_SCARED;
-    scaredPhase   = SCARED_PHASE_FACE1;
-    Serial.println("Reaction: SCARED");
-  }
-  drawSprite(currentSprite, 0, 0);
+  if (r == REACTION_HAPPY)   { currentSprite = SPR_HAPPY;   Serial.println("Reaction: HAPPY"); }
+  else if (r == REACTION_MAD)     { currentSprite = SPR_MAD;     Serial.println("Reaction: MAD"); }
+  else if (r == REACTION_DISGUST) { currentSprite = SPR_DISGUST; Serial.println("Reaction: DISGUST"); }
+  else if (r == REACTION_SCARED)  { currentSprite = SPR_SCARED; scaredPhase = SCARED_PHASE_FACE1; Serial.println("Reaction: SCARED"); }
+  drawBMP(currentSprite, 0, 0, true);
   lastFloatOffset = 0;
 }
 
@@ -585,7 +548,7 @@ void returnToNormal() {
   lastActivityTime = millis();
   lastFloatOffset  = 0;
   gfx->setBrightness(AWAKE_BRIGHTNESS);
-  drawSprite(SPR_NORMAL, 0, 0);
+  drawBMP(getContextSprite(false), 0, 0, true);
   Serial.println("Returned to normal");
 }
 
@@ -596,7 +559,7 @@ void enterSadMode() {
   stateStartTime  = millis();
   isBlinking      = false;
   lastFloatOffset = 0;
-  drawSprite(SPR_SAD, 0, 0);
+  drawBMP(SPR_SAD, 0, 0, true);
   Serial.println("Entered sad mode");
 }
 
@@ -607,7 +570,7 @@ void enterSleepMode() {
   lastZzzTime     = millis();
   lastFloatOffset = 0;
   gfx->setBrightness(SLEEP_BRIGHTNESS);
-  drawSprite(SPR_BLINK, 0, 0);
+  drawBMP(SPR_BLINK, 0, 0, true);
   Serial.println("Entered sleep mode");
 }
 
@@ -616,123 +579,131 @@ int getFloatOffset() {
   return (int)(sin(millis() * FLOAT_SPEED) * FLOAT_AMPLITUDE);
 }
 
-// ─── PRELOAD ALL SPRITES ──────────────────────────────────────────────────────
-void preloadSprites() {
-  Serial.println("Preloading sprites...");
-  unsigned long start = millis();
-  for (int i = 0; i < SPRITE_COUNT; i++) {
-    loadBMP(spriteFiles[i], sprites[i]);
-  }
-  Serial.print("All sprites loaded in ");
-  Serial.print(millis() - start);
-  Serial.println("ms");
-  Serial.print("Free PSRAM after sprites: ");
-  Serial.print(ESP.getFreePsram() / 1024);
-  Serial.println("KB");
-}
-
-// ─── WIFI: LOAD CREDENTIALS FROM SD ──────────────────────────────────────────
-// Reads /wifi.cfg — line 1 = SSID, line 2 = password
+// ─── WIFI ─────────────────────────────────────────────────────────────────────
 bool loadWifiConfig(char* ssid, char* password, int maxLen) {
   File f = SD_MMC.open("/wifi.cfg");
-  if (!f) {
-    Serial.println("wifi.cfg not found on SD — skipping WiFi");
-    return false;
-  }
+  if (!f) { Serial.println("wifi.cfg not found — skipping WiFi"); return false; }
   String s = f.readStringUntil('\n'); s.trim();
   String p = f.readStringUntil('\n'); p.trim();
   f.close();
-  if (s.length() == 0 || p.length() == 0) {
-    Serial.println("wifi.cfg empty or malformed — skipping WiFi");
-    return false;
-  }
-  s.toCharArray(ssid,     maxLen);
+  if (s.length() == 0 || p.length() == 0) { Serial.println("wifi.cfg malformed"); return false; }
+  s.toCharArray(ssid, maxLen);
   p.toCharArray(password, maxLen);
   return true;
 }
 
-// ─── WIFI: CONNECT + NTP SYNC ─────────────────────────────────────────────────
 void initWifi() {
-  char ssid[64]     = {0};
-  char password[64] = {0};
-
+  char ssid[64] = {0}, password[64] = {0};
   if (!loadWifiConfig(ssid, password, 64)) return;
-
   Serial.print("Connecting to WiFi: "); Serial.println(ssid);
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-    delay(200);
-  }
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connection timed out — continuing offline");
-    WiFi.disconnect(true);
-    return;
-  }
-
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) delay(200);
+  if (WiFi.status() != WL_CONNECTED) { Serial.println("WiFi timed out"); WiFi.disconnect(true); return; }
   wifiConnected = true;
   Serial.print("WiFi connected. IP: "); Serial.println(WiFi.localIP());
-
-  // Sync time via NTP
   configTzTime(TZ_STRING, NTP_SERVER);
-  Serial.print("Syncing NTP time");
+  Serial.print("Syncing NTP");
   unsigned long ntpStart = millis();
   struct tm ti;
-  while (!getLocalTime(&ti) && millis() - ntpStart < 8000) {
-    Serial.print(".");
-    delay(500);
-  }
+  while (!getLocalTime(&ti) && millis() - ntpStart < 8000) { Serial.print("."); delay(500); }
   if (getLocalTime(&ti)) {
     timesynced = true;
     Serial.printf("\nTime synced: %02d:%02d:%02d\n", ti.tm_hour, ti.tm_min, ti.tm_sec);
   } else {
-    Serial.println("\nNTP sync failed — time unavailable");
+    Serial.println("\nNTP sync failed");
   }
 }
 
-// ─── WIFI: GET CURRENT TIME ───────────────────────────────────────────────────
-// Returns false if time not yet synced. Fills a tm struct for callers.
-bool getTimeInfo(struct tm* ti) {
-  if (!timesynced) return false;
-  return getLocalTime(ti);
+// ─── LOCATION ─────────────────────────────────────────────────────────────────
+void loadLocationConfig() {
+  File f = SD_MMC.open("/location.cfg");
+  if (!f) { Serial.println("location.cfg not found — weather disabled"); return; }
+  String lat = f.readStringUntil('\n'); lat.trim();
+  String lon = f.readStringUntil('\n'); lon.trim();
+  f.close();
+  if (lat.length() == 0 || lon.length() == 0) { Serial.println("location.cfg malformed"); return; }
+  locationLat  = lat.toFloat();
+  locationLon  = lon.toFloat();
+  locationLoaded = true;
+  Serial.printf("Location: %.4f, %.4f\n", locationLat, locationLon);
 }
 
-// Convenience: returns hour (0-23), or -1 if unavailable
-int getCurrentHour() {
-  struct tm ti;
-  if (!getTimeInfo(&ti)) return -1;
-  return ti.tm_hour;
+// ─── WEATHER ──────────────────────────────────────────────────────────────────
+void fetchWeather() {
+  if (!wifiConnected || !locationLoaded) return;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  const char* host = "api.open-meteo.com";
+  char path[200];
+  snprintf(path, sizeof(path),
+    "/v1/forecast?latitude=%.4f&longitude=%.4f&current_weather=true&temperature_unit=fahrenheit",
+    locationLat, locationLon);
+
+  if (!client.connect(host, 443)) { Serial.println("Weather: connect failed"); return; }
+  client.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
+
+  unsigned long timeout = millis();
+  while (client.available() == 0 && millis() - timeout < 8000) delay(10);
+  if (!client.available()) { Serial.println("Weather: timed out"); client.stop(); return; }
+
+  // Read entire response, find the JSON body by locating the first '{'
+  String full = "";
+  while (client.available()) full += (char)client.read();
+  client.stop();
+
+  int jsonStart = full.indexOf('{');
+  if (jsonStart < 0) { Serial.println("Weather: no JSON in response"); return; }
+  String body = full.substring(jsonStart);
+
+  // Find current_weather block first, then parse within it
+  int cwIdx = body.indexOf("\"current_weather\":");
+  if (cwIdx < 0) {
+    Serial.println("Weather: current_weather block not found");
+    Serial.println(body.substring(0, 200));
+    return;
+  }
+  String cw = body.substring(cwIdx);
+
+  int tIdx = cw.indexOf("\"temperature\":");
+  int cIdx = cw.indexOf("\"weathercode\":");
+  if (tIdx < 0 || cIdx < 0) {
+    Serial.println("Weather: parse failed");
+    Serial.println(cw.substring(0, 200));
+    return;
+  }
+
+  weatherTempF     = cw.substring(tIdx + 14).toFloat();
+  weatherCode      = cw.substring(cIdx + 14).toInt();
+  lastWeatherFetch = millis();
+  Serial.printf("Weather: %.1f°F  code:%d\n", weatherTempF, weatherCode);
 }
 
-// ─── WEB SERVER: ROUTES ───────────────────────────────────────────────────────
+// ─── WEB SERVER ───────────────────────────────────────────────────────────────
 void handleRoot() {
   struct tm ti;
   bool hasTime = getLocalTime(&ti);
-
   String html = "<!DOCTYPE html><html><head>";
-  html += "<meta charset='utf-8'>";
-  html += "<meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
   html += "<title>Nanoid</title>";
   html += "<style>body{background:#1a1a2e;color:#e0e0e0;font-family:monospace;padding:2em;}";
   html += "h1{color:#7fff7f;}span.dim{color:#888;}.box{border:1px solid #444;padding:1em;margin:1em 0;border-radius:6px;}</style>";
-  html += "</head><body>";
-  html += "<h1>// NANOID v2.0</h1>";
-  html += "<div class='box'>";
+  html += "</head><body><h1>// NANOID v2.0</h1><div class='box'>";
   if (hasTime) {
-    html += "<p>&#128336; <b>";
-    html += String(ti.tm_hour) + ":" + (ti.tm_min < 10 ? "0" : "") + String(ti.tm_min);
+    html += "<p>&#128336; <b>" + String(ti.tm_hour) + ":" + (ti.tm_min < 10 ? "0" : "") + String(ti.tm_min);
     html += "</b> <span class='dim'>Mountain Time</span></p>";
   } else {
     html += "<p><span class='dim'>time not synced</span></p>";
   }
+  if (weatherTempF > -999.0) {
+    html += "<p>&#127777; <b>" + String((int)weatherTempF) + "°F</b>";
+    html += " <span class='dim'>code:" + String(weatherCode) + "</span></p>";
+  }
   html += "<p>&#128246; IP: " + WiFi.localIP().toString() + "</p>";
-  html += "</div>";
-  html += "<div class='box'><p><span class='dim'>more controls coming soon...</span></p></div>";
+  html += "</div><div class='box'><p><span class='dim'>more controls coming soon...</span></p></div>";
   html += "</body></html>";
-
   webServer.send(200, "text/html", html);
 }
 
@@ -750,38 +721,36 @@ void setup() {
   pinMode(PWR_BUTTON_PIN, INPUT_PULLUP);
 
   touch.setPins(TP_RESET, TP_INT);
-  if (!touch.begin(Wire, 0x5A, IIC_SDA, IIC_SCL)) {
-    Serial.println("Touch init failed!");
-  } else {
-    Serial.println("Touch initialized.");
-  }
+  if (!touch.begin(Wire, 0x5A, IIC_SDA, IIC_SCL)) Serial.println("Touch init failed!");
+  else Serial.println("Touch initialized.");
   attachInterrupt(TP_INT, onTouchInterrupt, FALLING);
 
-  if (!qmi.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
-    Serial.println("IMU init failed!");
-  } else {
+  if (!qmi.begin(Wire, QMI8658_L_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) Serial.println("IMU init failed!");
+  else {
     Serial.println("IMU initialized.");
     qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_4G, SensorQMI8658::ACC_ODR_125Hz, SensorQMI8658::LPF_MODE_0);
     qmi.enableAccelerometer();
   }
 
   SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_DATA);
-  if (!SD_MMC.begin("/sdcard", true)) {
-    Serial.println("SD card mount failed!");
-  } else {
-    Serial.println("SD card mounted.");
-  }
+  if (!SD_MMC.begin("/sdcard", true)) Serial.println("SD mount failed!");
+  else Serial.println("SD mounted.");
 
-  // WiFi — loads credentials from /wifi.cfg on SD, connects silently
   initWifi();
   initWebServer();
+  loadLocationConfig();
+  fetchWeather();
 
-  if (!gfx->begin()) {
-    Serial.println("Display init failed!");
-  }
+  if (!gfx->begin()) Serial.println("Display init failed!");
   gfx->setBrightness(AWAKE_BRIGHTNESS);
 
-  preloadSprites();
+  frameBuffer = (uint16_t*)ps_malloc(SCREEN_W * SCREEN_H * 2);
+  if (!frameBuffer) Serial.println("frameBuffer alloc failed!");
+  else {
+    Serial.print("frameBuffer ready. Free PSRAM: ");
+    Serial.print(ESP.getFreePsram() / 1024);
+    Serial.println("KB");
+  }
 
   unsigned long now = millis();
   lastBlinkTime     = now;
@@ -792,60 +761,51 @@ void setup() {
   scheduleNextGlitch();
   scheduleNextWave();
 
-  // Allocate reusable animation frame buffer in PSRAM
-  frameBuffer = (uint16_t*)ps_malloc(466 * 466 * 2);
-  if (!frameBuffer) {
-    Serial.println("Frame buffer alloc failed!");
-  } else {
-    Serial.println("Frame buffer ready.");
-  }
-
-  drawSprite(SPR_NORMAL, 0, 0);
+  drawBMP(getContextSprite(false), 0, 0, true);
 }
 
 // ─── MAIN LOOP ────────────────────────────────────────────────────────────────
 void loop() {
   unsigned long now = millis();
 
-  // ── Web server — handle any incoming requests ──
   if (wifiConnected) webServer.handleClient();
 
-  // ── PWR BUTTON (GPIO 0) — toggle walk mode ──
+  if (wifiConnected && locationLoaded &&
+      (lastWeatherFetch == 0 || millis() - lastWeatherFetch >= WEATHER_INTERVAL)) {
+    fetchWeather();
+  }
+
+  // ── PWR BUTTON — toggle walk mode ──
   bool pwrButton = digitalRead(PWR_BUTTON_PIN);
   if (pwrButton == LOW && pwrButtonPrev == HIGH && (now - pwrDebounce > PWR_DEBOUNCE_MS)) {
-    pwrDebounce   = now;
+    pwrDebounce = now;
     if (currentMode == FACE_NORMAL) {
       currentMode      = FACE_WALK;
       walkFrameIndex   = 0;
       lastWalkFrame    = now;
       lastActivityTime = now;
-      Serial.println("Walk mode ON");
+      Serial.println("Walk ON");
     } else if (currentMode == FACE_WALK) {
       returnToNormal();
-      Serial.println("Walk mode OFF");
+      Serial.println("Walk OFF");
     }
   }
   pwrButtonPrev = pwrButton;
 
+  // ── TOUCH ──
   if (touchInterrupt) {
     touchInterrupt = false;
     uint8_t touched = touch.getPoint(touchX, touchY, touch.getSupportTouchPoint());
     if (touched > 0) {
       lastActivityTime = now;
-
-      // Wake from sleep or sad
       if (currentMode == FACE_SLEEP || currentMode == TEXT_SLEEP || currentMode == FACE_SAD) {
         returnToNormal();
         tapCount  = 0;
         touchHeld = false;
         return;
       }
-
       if (currentMode == FACE_NORMAL) {
-        if (!touchHeld) {
-          touchHeld     = true;
-          touchDownTime = now;
-        }
+        if (!touchHeld) { touchHeld = true; touchDownTime = now; }
         if (now - lastTapTime > TAP_GAP) {
           tapCount++;
           lastTapTime    = now;
@@ -853,7 +813,6 @@ void loop() {
         }
       }
     } else {
-      // Finger lifted — check for jump range
       if (touchHeld && currentMode == FACE_NORMAL) {
         Serial.print("Released. tapCount: "); Serial.println(tapCount);
         if (tapCount >= 10 && tapCount <= 60) {
@@ -871,7 +830,7 @@ void loop() {
   }
 
   if (tapCount > 0 && currentMode == FACE_NORMAL && (now - tapWindowStart > TAP_WINDOW)) {
-    if (tapCount == 2) triggerReaction(REACTION_HAPPY);
+    if (tapCount == 2)      triggerReaction(REACTION_HAPPY);
     else if (tapCount == 3) triggerReaction(REACTION_MAD);
     tapCount = 0;
   }
@@ -890,37 +849,22 @@ void loop() {
 
   if (currentMode == FACE_NORMAL || currentMode == FACE_SAD) {
     unsigned long inactive = millis() - lastActivityTime;
-    if (inactive >= SLEEP_TIMEOUT && currentMode != FACE_SLEEP) {
-      enterSleepMode(); return;
-    } else if (inactive >= SAD_TIMEOUT && currentMode == FACE_NORMAL) {
-      enterSadMode(); return;
-    }
+    if (inactive >= SLEEP_TIMEOUT) { enterSleepMode(); return; }
+    if (inactive >= SAD_TIMEOUT && currentMode == FACE_NORMAL) { enterSadMode(); return; }
   }
 
   if (currentMode == FACE_NORMAL) {
-    if (now >= nextDisgustTime) {
-      scheduleNextDisgust();
-      triggerReaction(REACTION_DISGUST);
-      return;
-    }
+    if (now >= nextDisgustTime) { scheduleNextDisgust(); triggerReaction(REACTION_DISGUST); return; }
     if (now >= nextGlitchTime) {
       scheduleNextGlitch();
-      glitchType        = random(2);
-      terminalCharIndex = 0;
-      terminalDone      = false;
-      terminalGlitching = false;
-      currentMode       = FACE_GLITCH;
-      glitchStartTime   = now;
-      lastGlitchFrame   = now;
-      Serial.print("Glitch! type:");
-      Serial.println(glitchType == 0 ? "rainbow" : "terminal");
+      glitchType = random(2); terminalCharIndex = 0; terminalDone = false; terminalGlitching = false;
+      currentMode = FACE_GLITCH; glitchStartTime = now; lastGlitchFrame = now;
+      Serial.print("Glitch! "); Serial.println(glitchType == 0 ? "rainbow" : "terminal");
       return;
     }
     if (now >= nextWaveTime) {
       scheduleNextWave();
-      currentMode    = FACE_WAVE;
-      waveFrameIndex = 0;
-      lastWaveFrame  = now;
+      currentMode = FACE_WAVE; waveFrameIndex = 0; lastWaveFrame = now;
       Serial.println("Wave triggered!");
       return;
     }
@@ -929,31 +873,23 @@ void loop() {
   if (currentMode == FACE_GLITCH) {
     if (glitchType == 0) {
       if (now - glitchStartTime >= GLITCH_DURATION) {
-        gfx->fillScreen(BG_COLOR);
-        drawSprite(SPR_NORMAL, lastFloatOffset, lastFloatOffset);
+        drawBMP(getContextSprite(false), lastFloatOffset, lastFloatOffset, true);
         currentMode = FACE_NORMAL;
         Serial.println("Glitch ended");
       } else if (now - lastGlitchFrame >= GLITCH_FRAME_RATE) {
-        drawGlitchFrame();
-        lastGlitchFrame = now;
+        drawGlitchFrame(); lastGlitchFrame = now;
       }
     } else {
       if (!terminalDone) {
         if (now - lastGlitchFrame >= GLITCH_FRAME_RATE) {
-          drawGlitchFrame();
-          lastGlitchFrame = now;
-          int cols = SCREEN_W / 12;
-          int rows = SCREEN_H / 16;
-          if (terminalCharIndex >= cols * rows) {
-            terminalDone     = true;
-            terminalDoneTime = now;
-            Serial.println("Terminal done, holding...");
+          drawGlitchFrame(); lastGlitchFrame = now;
+          if (terminalCharIndex >= (SCREEN_W / 12) * (SCREEN_H / 16)) {
+            terminalDone = true; terminalDoneTime = now;
           }
         }
       } else {
         if (now - terminalDoneTime >= TERMINAL_HOLD) {
-          gfx->fillScreen(BG_COLOR);
-          drawSprite(SPR_NORMAL, lastFloatOffset, lastFloatOffset);
+          drawBMP(getContextSprite(false), lastFloatOffset, lastFloatOffset, true);
           currentMode = FACE_NORMAL;
           Serial.println("Glitch ended");
         }
@@ -964,21 +900,22 @@ void loop() {
 
   if (currentMode == FACE_JUMP) {
     if (now - lastJumpFrame >= JUMP_FRAME_MS) {
-      drawJumpFrame(jumpFrameIndex);
+      char filename[16];
+      snprintf(filename, sizeof(filename), "/jump%d.bmp", jumpFrameIndex + 1);
+      drawAnimFrame(filename, -1, -1);
       lastJumpFrame = now;
       jumpFrameIndex++;
-      if (jumpFrameIndex >= JUMP_FRAME_COUNT) {
-        returnToNormal();
-        Serial.println("Jump complete");
-      }
+      if (jumpFrameIndex >= JUMP_FRAME_COUNT) { returnToNormal(); Serial.println("Jump complete"); }
     }
     return;
   }
 
   if (currentMode == FACE_WALK) {
-    lastActivityTime = now;  // stay awake while walking
+    lastActivityTime = now;
     if (now - lastWalkFrame >= WALK_FRAME_MS) {
-      drawWalkFrame(walkFrameIndex);
+      char filename[16];
+      snprintf(filename, sizeof(filename), "/walk%d.bmp", walkFrameIndex + 1);
+      drawAnimFrame(filename, -1, -1);
       lastWalkFrame  = now;
       walkFrameIndex = (walkFrameIndex + 1) % WALK_FRAME_COUNT;
     }
@@ -987,13 +924,12 @@ void loop() {
 
   if (currentMode == FACE_WAVE) {
     if (now - lastWaveFrame >= WAVE_FRAME_MS) {
-      drawWaveFrame(waveSequence[waveFrameIndex]);
+      char filename[16];
+      snprintf(filename, sizeof(filename), "/wave%d.bmp", waveSequence[waveFrameIndex]);
+      drawAnimFrame(filename, -1, -1);
       lastWaveFrame = now;
       waveFrameIndex++;
-      if (waveFrameIndex >= WAVE_SEQUENCE_LENGTH) {
-        returnToNormal();
-        Serial.println("Wave complete");
-      }
+      if (waveFrameIndex >= WAVE_SEQUENCE_LENGTH) { returnToNormal(); Serial.println("Wave complete"); }
     }
     return;
   }
@@ -1002,19 +938,16 @@ void loop() {
 
   if (currentMode == FACE_SLEEP) {
     if (now - lastZzzTime >= ZZZ_INTERVAL) {
-      currentMode    = TEXT_SLEEP;
-      stateStartTime = now;
-      drawTextCentered("zzz...");
-      Serial.println("zzz...");
+      currentMode = TEXT_SLEEP; stateStartTime = now;
+      drawTextCentered("zzz..."); Serial.println("zzz...");
     }
     return;
   }
 
   if (currentMode == TEXT_SLEEP) {
     if (now - stateStartTime >= ZZZ_DURATION) {
-      currentMode = FACE_SLEEP;
-      lastZzzTime = now;
-      drawSprite(SPR_BLINK, 0, 0);
+      currentMode = FACE_SLEEP; lastZzzTime = now;
+      drawBMP(SPR_BLINK, 0, 0, true);
     }
     return;
   }
@@ -1022,26 +955,19 @@ void loop() {
   if (currentMode == FACE_REACTION) {
     if (activeReaction == REACTION_SCARED) {
       if (scaredPhase == SCARED_PHASE_FACE1 && now - stateStartTime >= SCARED_FACE_1_DURATION) {
-        scaredPhase    = SCARED_PHASE_TEXT;
-        stateStartTime = now;
-        drawAhhhhText();
+        scaredPhase = SCARED_PHASE_TEXT; stateStartTime = now; drawAhhhhText();
       } else if (scaredPhase == SCARED_PHASE_TEXT && now - stateStartTime >= SCARED_TEXT_DURATION) {
-        scaredPhase    = SCARED_PHASE_FACE2;
-        stateStartTime = now;
-        drawSprite(SPR_SCARED, 0, 0);
+        scaredPhase = SCARED_PHASE_FACE2; stateStartTime = now; drawBMP(SPR_SCARED, 0, 0, true);
       } else if (scaredPhase == SCARED_PHASE_FACE2 && now - stateStartTime >= SCARED_FACE_2_DURATION) {
-        scaredPhase    = SCARED_PHASE_SAD;
-        stateStartTime = now;
-        currentSprite  = SPR_SAD;
-        drawSprite(SPR_SAD, 0, 0);
+        scaredPhase = SCARED_PHASE_SAD; stateStartTime = now;
+        currentSprite = SPR_SAD; drawBMP(SPR_SAD, 0, 0, true);
       } else if (scaredPhase == SCARED_PHASE_SAD && now - stateStartTime >= SCARED_SAD_DURATION) {
         returnToNormal();
       }
       return;
     }
     if (now - stateStartTime >= REACTION_FACE_DURATION) {
-      currentMode    = TEXT_REACTION;
-      stateStartTime = now;
+      currentMode = TEXT_REACTION; stateStartTime = now;
       if (activeReaction == REACTION_HAPPY)        drawTextCentered("hi!");
       else if (activeReaction == REACTION_MAD)     drawTextCentered("hisssss.");
       else if (activeReaction == REACTION_DISGUST) drawUghText();
@@ -1051,43 +977,35 @@ void loop() {
 
   if (currentMode == TEXT_REACTION) {
     if (now - stateStartTime >= REACTION_TEXT_DURATION) {
-      currentMode     = FACE_HOLD;
-      stateStartTime  = now;
-      drawSprite(currentSprite, 0, 0);
-      lastFloatOffset = 0;
-      lastFloatDraw   = now;
+      currentMode = FACE_HOLD; stateStartTime = now;
+      drawBMP(currentSprite, 0, 0, true);
+      lastFloatOffset = 0; lastFloatDraw = now;
     }
     return;
   }
 
   if (currentMode == FACE_HOLD) {
-    if (now - stateStartTime >= REACTION_HOLD_DURATION) {
-      returnToNormal(); return;
-    }
+    if (now - stateStartTime >= REACTION_HOLD_DURATION) { returnToNormal(); return; }
     if (now - lastFloatDraw >= FLOAT_INTERVAL) {
-      int newOffset   = getFloatOffset();
-      drawSprite(currentSprite, newOffset, lastFloatOffset);
-      lastFloatOffset = newOffset;
-      lastFloatDraw   = now;
+      int newOffset = getFloatOffset();
+      drawBMP(currentSprite, newOffset, lastFloatOffset);
+      lastFloatOffset = newOffset; lastFloatDraw = now;
     }
     return;
   }
 
   if (currentMode == FACE_NORMAL) {
     if (!isBlinking && (now - lastBlinkTime >= BLINK_INTERVAL)) {
-      isBlinking     = true;
-      blinkStartTime = now;
-      drawSprite(SPR_BLINK, lastFloatOffset, lastFloatOffset);
+      isBlinking = true; blinkStartTime = now;
+      drawBMP(getContextSprite(true), lastFloatOffset, lastFloatOffset, true);
     }
     if (isBlinking && (now - blinkStartTime >= BLINK_LENGTH)) {
-      isBlinking    = false;
-      lastBlinkTime = now;
+      isBlinking = false; lastBlinkTime = now;
     }
     if (!isBlinking && (now - lastFloatDraw >= FLOAT_INTERVAL)) {
-      int newOffset   = getFloatOffset();
-      drawSprite(SPR_NORMAL, newOffset, lastFloatOffset);
-      lastFloatOffset = newOffset;
-      lastFloatDraw   = now;
+      int newOffset = getFloatOffset();
+      drawBMP(getContextSprite(false), newOffset, lastFloatOffset);
+      lastFloatOffset = newOffset; lastFloatDraw = now;
     }
   }
 }

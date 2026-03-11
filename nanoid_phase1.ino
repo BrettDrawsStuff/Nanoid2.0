@@ -11,6 +11,7 @@
 #include <WebServer.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
+#include "nanoid_audio.h"
 
 // ─── DISPLAY SETUP ────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -221,6 +222,7 @@ enum ScaredPhase {
   SCARED_PHASE_SAD
 };
 ScaredPhase scaredPhase = SCARED_PHASE_FACE1;
+
 
 const unsigned long SAD_TIMEOUT   = 5UL  * 60 * 1000;
 const unsigned long SLEEP_TIMEOUT = 15UL * 60 * 1000;
@@ -528,10 +530,10 @@ void triggerReaction(Reaction r) {
   currentMode    = FACE_REACTION;
   stateStartTime = millis();
   isBlinking     = false;
-  if (r == REACTION_HAPPY)   { currentSprite = SPR_HAPPY;   Serial.println("Reaction: HAPPY"); }
-  else if (r == REACTION_MAD)     { currentSprite = SPR_MAD;     Serial.println("Reaction: MAD"); }
-  else if (r == REACTION_DISGUST) { currentSprite = SPR_DISGUST; Serial.println("Reaction: DISGUST"); }
-  else if (r == REACTION_SCARED)  { currentSprite = SPR_SCARED; scaredPhase = SCARED_PHASE_FACE1; Serial.println("Reaction: SCARED"); }
+  if (r == REACTION_HAPPY)   { currentSprite = SPR_HAPPY; nanoid_audio_play("/snd/happy.wav"); Serial.println("Reaction: HAPPY"); }
+  else if (r == REACTION_MAD)     { currentSprite = SPR_MAD;   nanoid_audio_play("/snd/mad.wav");   Serial.println("Reaction: MAD"); }
+  else if (r == REACTION_DISGUST) { currentSprite = SPR_DISGUST; nanoid_audio_play("/snd/disgust.wav"); Serial.println("Reaction: DISGUST"); }
+  else if (r == REACTION_SCARED)  { currentSprite = SPR_SCARED; scaredPhase = SCARED_PHASE_FACE1; nanoid_audio_play("/snd/scared.wav"); Serial.println("Reaction: SCARED"); }
   drawBMP(currentSprite, 0, 0, true);
   lastFloatOffset = 0;
 }
@@ -560,6 +562,7 @@ void enterSadMode() {
   isBlinking      = false;
   lastFloatOffset = 0;
   drawBMP(SPR_SAD, 0, 0, true);
+  nanoid_audio_play("/snd/sad.wav");
   Serial.println("Entered sad mode");
 }
 
@@ -571,6 +574,7 @@ void enterSleepMode() {
   lastFloatOffset = 0;
   gfx->setBrightness(SLEEP_BRIGHTNESS);
   drawBMP(SPR_BLINK, 0, 0, true);
+  nanoid_audio_play("/snd/sleep.wav");
   Serial.println("Entered sleep mode");
 }
 
@@ -714,6 +718,15 @@ void initWebServer() {
   Serial.println("Web server started");
 }
 
+
+
+
+// ─── AUDIO SCHEDULING ─────────────────────────────────────────────────────────
+unsigned long nextIdleSound = 0;
+void scheduleNextIdleSound() {
+  nextIdleSound = millis() + (3UL * 60 * 1000) + random(7UL * 60 * 1000);
+}
+
 // ─── SETUP ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -736,6 +749,7 @@ void setup() {
   if (!SD_MMC.begin("/sdcard", true)) Serial.println("SD mount failed!");
   else Serial.println("SD mounted.");
 
+  nanoid_audio_init();
   initWifi();
   initWebServer();
   loadLocationConfig();
@@ -761,6 +775,13 @@ void setup() {
   scheduleNextGlitch();
   scheduleNextWave();
 
+
+
+
+
+  scheduleNextIdleSound();
+  nanoid_audio_play("/snd/boot.wav");
+
   drawBMP(getContextSprite(false), 0, 0, true);
 }
 
@@ -768,6 +789,7 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
+  nanoid_audio_loop();
   if (wifiConnected) webServer.handleClient();
 
   if (wifiConnected && locationLoaded &&
@@ -784,6 +806,7 @@ void loop() {
       walkFrameIndex   = 0;
       lastWalkFrame    = now;
       lastActivityTime = now;
+      nanoid_audio_play("/snd/walk.wav");
       Serial.println("Walk ON");
     } else if (currentMode == FACE_WALK) {
       returnToNormal();
@@ -799,6 +822,7 @@ void loop() {
     if (touched > 0) {
       lastActivityTime = now;
       if (currentMode == FACE_SLEEP || currentMode == TEXT_SLEEP || currentMode == FACE_SAD) {
+        nanoid_audio_play("/snd/wake.wav");
         returnToNormal();
         tapCount  = 0;
         touchHeld = false;
@@ -821,6 +845,7 @@ void loop() {
           lastJumpFrame  = now;
           tapCount       = 0;
           touchHeld      = false;
+          nanoid_audio_play("/snd/jump.wav");
           Serial.println("Jump triggered!");
           return;
         }
@@ -854,17 +879,24 @@ void loop() {
   }
 
   if (currentMode == FACE_NORMAL) {
+    if (now >= nextIdleSound) {
+      scheduleNextIdleSound();
+      const char* idleSounds[] = {"/snd/idle1.wav", "/snd/idle2.wav", "/snd/idle3.wav"};
+      nanoid_audio_play(idleSounds[random(3)]);
+    }
     if (now >= nextDisgustTime) { scheduleNextDisgust(); triggerReaction(REACTION_DISGUST); return; }
     if (now >= nextGlitchTime) {
       scheduleNextGlitch();
       glitchType = random(2); terminalCharIndex = 0; terminalDone = false; terminalGlitching = false;
       currentMode = FACE_GLITCH; glitchStartTime = now; lastGlitchFrame = now;
+      nanoid_audio_play("/snd/glitch.wav");
       Serial.print("Glitch! "); Serial.println(glitchType == 0 ? "rainbow" : "terminal");
       return;
     }
     if (now >= nextWaveTime) {
       scheduleNextWave();
       currentMode = FACE_WAVE; waveFrameIndex = 0; lastWaveFrame = now;
+      nanoid_audio_play("/snd/wave.wav");
       Serial.println("Wave triggered!");
       return;
     }

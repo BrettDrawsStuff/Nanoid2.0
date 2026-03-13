@@ -12,6 +12,7 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include "nanoid_audio.h"
+#include "nanoid_mic.h"
 
 // ─── DISPLAY SETUP ────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -37,7 +38,6 @@ unsigned long lastShakeTime        = 0;
 #define BG_COLOR 0x31A8
 
 // ─── WIFI & NTP ───────────────────────────────────────────────────────────────
-// Credentials loaded from /wifi.cfg on SD (line 1 = SSID, line 2 = password)
 WebServer webServer(80);
 bool wifiConnected = false;
 bool timesynced    = false;
@@ -46,13 +46,12 @@ bool timesynced    = false;
 #define TZ_STRING  "MST7MDT,M3.2.0,M11.1.0"
 
 // ─── LOCATION & WEATHER ───────────────────────────────────────────────────────
-// Coordinates loaded from /location.cfg on SD (line 1 = lat, line 2 = lon)
 float locationLat      = 0.0;
 float locationLon      = 0.0;
 bool  locationLoaded   = false;
 
-float weatherTempF         = -999.0; // -999 = not yet fetched
-int   weatherCode          = -1;     // WMO code, -1 = unknown
+float weatherTempF         = -999.0;
+int   weatherCode          = -1;
 unsigned long lastWeatherFetch = 0;
 const unsigned long WEATHER_INTERVAL = 2UL * 60 * 60 * 1000;
 
@@ -64,9 +63,6 @@ const unsigned long WEATHER_INTERVAL = 2UL * 60 * 60 * 1000;
 #define HOUR_NIGHT_START   21
 
 // ─── SPRITE FILENAMES ─────────────────────────────────────────────────────────
-// All sprites stream from SD. Nothing is preloaded into PSRAM.
-// The frameBuffer holds the currently displayed sprite between redraws.
-
 #define SPR_NORMAL             0
 #define SPR_BLINK              1
 #define SPR_HAPPY              2
@@ -145,7 +141,6 @@ const char* spriteFiles[SPR_COUNT] = {
 };
 
 // ─── FRAME BUFFER ─────────────────────────────────────────────────────────────
-// Single PSRAM buffer for all drawing. Cached sprite redraws blit from here.
 uint16_t* frameBuffer    = nullptr;
 int cachedSpriteIndex    = -1;
 int cachedSpriteW        = 0;
@@ -164,6 +159,9 @@ enum Mode {
   FACE_JUMP,
   FACE_WALK,
   FACE_WAVE,
+  FACE_LISTEN_PREP,  // codec reinit happening, waiting for MCLK settle
+  FACE_LISTEN,
+  FACE_THINKING,
 };
 
 Mode currentMode  = FACE_NORMAL;
@@ -223,7 +221,6 @@ enum ScaredPhase {
 };
 ScaredPhase scaredPhase = SCARED_PHASE_FACE1;
 
-
 const unsigned long SAD_TIMEOUT   = 5UL  * 60 * 1000;
 const unsigned long SLEEP_TIMEOUT = 15UL * 60 * 1000;
 
@@ -263,11 +260,18 @@ int waveFrameIndex           = 0;
 unsigned long lastWaveFrame  = 0;
 unsigned long nextWaveTime   = 0;
 
-// PWR button (GPIO 0) — toggles walk mode
+// PWR button (GPIO 0) — short press = walk toggle, long press = listen
 #define PWR_BUTTON_PIN 0
 bool pwrButtonPrev              = HIGH;
 unsigned long pwrDebounce       = 0;
 const unsigned long PWR_DEBOUNCE_MS = 50;
+
+// Long press tracking
+unsigned long pwrHoldStart       = 0;
+bool          pwrHoldArmed       = false;
+bool          pwrLongFired       = false;
+const unsigned long LONG_PRESS_MS = 2500;
+unsigned long micStartTime        = 0; // when mic actually began recording
 
 // ─── TAP DETECTION ────────────────────────────────────────────────────────────
 int tapCount                 = 0;
@@ -289,9 +293,6 @@ void IRAM_ATTR onTouchInterrupt() {
 }
 
 // ─── drawBMP ──────────────────────────────────────────────────────────────────
-// Loads a sprite by index from SD into frameBuffer (cached — only re-reads SD
-// when spriteIndex changes or forceReload=true). Blits to display with float
-// offset delta correction so only the shifted gap strip is filled with BG_COLOR.
 void drawBMP(int spriteIndex, int floatOffset, int prevOffset, bool forceReload = false) {
   if (!frameBuffer) return;
   if (spriteIndex < 0 || spriteIndex >= SPR_COUNT) return;
@@ -344,9 +345,6 @@ void drawBMP(int spriteIndex, int floatOffset, int prevOffset, bool forceReload 
 }
 
 // ─── drawAnimFrame ────────────────────────────────────────────────────────────
-// Streams an animation frame from SD by filename. Always re-reads (no cache).
-// Invalidates the sprite cache since it overwrites frameBuffer.
-// Pass drawX=-1, drawY=-1 to center horizontally and dock to bottom.
 void drawAnimFrame(const char* filename, int drawX, int drawY) {
   if (!frameBuffer) return;
   File file = SD_MMC.open(filename);
@@ -376,7 +374,7 @@ void drawAnimFrame(const char* filename, int drawX, int drawY) {
     }
   }
   file.close();
-  cachedSpriteIndex = -1; // frameBuffer no longer holds a cached sprite
+  cachedSpriteIndex = -1;
   if (drawX < 0) drawX = (SCREEN_W - imgWidth) / 2;
   if (drawY < 0) drawY = SCREEN_H - imgHeight - 20;
   gfx->draw16bitRGBBitmap(drawX, drawY, frameBuffer, imgWidth, imgHeight);
@@ -530,10 +528,10 @@ void triggerReaction(Reaction r) {
   currentMode    = FACE_REACTION;
   stateStartTime = millis();
   isBlinking     = false;
-  if (r == REACTION_HAPPY)   { currentSprite = SPR_HAPPY; nanoid_audio_play("/snd/happy.wav"); Serial.println("Reaction: HAPPY"); }
-  else if (r == REACTION_MAD)     { currentSprite = SPR_MAD;   nanoid_audio_play("/snd/mad.wav");   Serial.println("Reaction: MAD"); }
+  if (r == REACTION_HAPPY)        { currentSprite = SPR_HAPPY;   nanoid_audio_play("/snd/happy.wav");   Serial.println("Reaction: HAPPY"); }
+  else if (r == REACTION_MAD)     { currentSprite = SPR_MAD;     nanoid_audio_play("/snd/mad.wav");     Serial.println("Reaction: MAD"); }
   else if (r == REACTION_DISGUST) { currentSprite = SPR_DISGUST; nanoid_audio_play("/snd/disgust.wav"); Serial.println("Reaction: DISGUST"); }
-  else if (r == REACTION_SCARED)  { currentSprite = SPR_SCARED; scaredPhase = SCARED_PHASE_FACE1; nanoid_audio_play("/snd/scared.wav"); Serial.println("Reaction: SCARED"); }
+  else if (r == REACTION_SCARED)  { currentSprite = SPR_SCARED;  scaredPhase = SCARED_PHASE_FACE1; nanoid_audio_play("/snd/scared.wav"); Serial.println("Reaction: SCARED"); }
   drawBMP(currentSprite, 0, 0, true);
   lastFloatOffset = 0;
 }
@@ -628,8 +626,8 @@ void loadLocationConfig() {
   String lon = f.readStringUntil('\n'); lon.trim();
   f.close();
   if (lat.length() == 0 || lon.length() == 0) { Serial.println("location.cfg malformed"); return; }
-  locationLat  = lat.toFloat();
-  locationLon  = lon.toFloat();
+  locationLat    = lat.toFloat();
+  locationLon    = lon.toFloat();
   locationLoaded = true;
   Serial.printf("Location: %.4f, %.4f\n", locationLat, locationLon);
 }
@@ -653,7 +651,6 @@ void fetchWeather() {
   while (client.available() == 0 && millis() - timeout < 8000) delay(10);
   if (!client.available()) { Serial.println("Weather: timed out"); client.stop(); return; }
 
-  // Read entire response, find the JSON body by locating the first '{'
   String full = "";
   while (client.available()) full += (char)client.read();
   client.stop();
@@ -662,7 +659,6 @@ void fetchWeather() {
   if (jsonStart < 0) { Serial.println("Weather: no JSON in response"); return; }
   String body = full.substring(jsonStart);
 
-  // Find current_weather block first, then parse within it
   int cwIdx = body.indexOf("\"current_weather\":");
   if (cwIdx < 0) {
     Serial.println("Weather: current_weather block not found");
@@ -718,9 +714,6 @@ void initWebServer() {
   Serial.println("Web server started");
 }
 
-
-
-
 // ─── AUDIO SCHEDULING ─────────────────────────────────────────────────────────
 unsigned long nextIdleSound = 0;
 void scheduleNextIdleSound() {
@@ -750,6 +743,8 @@ void setup() {
   else Serial.println("SD mounted.");
 
   nanoid_audio_init();
+  nanoid_mic_init();
+  nanoid_mic_scan_i2c();
   initWifi();
   initWebServer();
   loadLocationConfig();
@@ -775,10 +770,6 @@ void setup() {
   scheduleNextGlitch();
   scheduleNextWave();
 
-
-
-
-
   scheduleNextIdleSound();
   nanoid_audio_play("/snd/boot.wav");
 
@@ -790,6 +781,7 @@ void loop() {
   unsigned long now = millis();
 
   nanoid_audio_loop();
+  nanoid_mic_loop();
   if (wifiConnected) webServer.handleClient();
 
   if (wifiConnected && locationLoaded &&
@@ -797,22 +789,62 @@ void loop() {
     fetchWeather();
   }
 
-  // ── PWR BUTTON — toggle walk mode ──
+  // ── PWR BUTTON — short press = walk toggle, long press (2.5s) = listen ──
   bool pwrButton = digitalRead(PWR_BUTTON_PIN);
+
   if (pwrButton == LOW && pwrButtonPrev == HIGH && (now - pwrDebounce > PWR_DEBOUNCE_MS)) {
-    pwrDebounce = now;
-    if (currentMode == FACE_NORMAL) {
-      currentMode      = FACE_WALK;
-      walkFrameIndex   = 0;
-      lastWalkFrame    = now;
-      lastActivityTime = now;
-      nanoid_audio_play("/snd/walk.wav");
-      Serial.println("Walk ON");
-    } else if (currentMode == FACE_WALK) {
-      returnToNormal();
-      Serial.println("Walk OFF");
+    pwrDebounce  = now;
+    pwrHoldStart = now;
+    pwrHoldArmed = true;
+    pwrLongFired = false;
+  }
+
+  if (pwrHoldArmed && pwrButton == LOW && !pwrLongFired) {
+    if (now - pwrHoldStart >= LONG_PRESS_MS) {
+      pwrLongFired = true;
+      pwrHoldArmed = false;
+      if (currentMode == FACE_NORMAL || currentMode == FACE_WALK) {
+        if (currentMode == FACE_WALK) returnToNormal();
+        currentMode      = FACE_LISTEN_PREP;
+        stateStartTime   = now;
+        lastActivityTime = now;
+        drawBMP(SPR_CONFUSED, 0, 0, true);
+        lastFloatOffset = 0;
+        Serial.println("Listen prep started.");
+      }
     }
   }
+
+  if (pwrButton == HIGH && pwrButtonPrev == LOW) {
+    if (pwrHoldArmed && !pwrLongFired) {
+      // Short press — walk toggle
+      if (currentMode == FACE_NORMAL) {
+        currentMode      = FACE_WALK;
+        walkFrameIndex   = 0;
+        lastWalkFrame    = now;
+        lastActivityTime = now;
+        nanoid_audio_play("/snd/walk.wav");
+        Serial.println("Walk ON");
+      } else if (currentMode == FACE_WALK) {
+        returnToNormal();
+        Serial.println("Walk OFF");
+      }
+    }
+    if (currentMode == FACE_LISTEN && (millis() - micStartTime >= 1500)) {
+      Serial.printf("Stopping mic. micStartTime=%lu now=%lu elapsed=%lu\n", micStartTime, millis(), millis()-micStartTime);
+      // Released during listen (minimum 1.5s recorded) — stop and process
+      nanoid_mic_stop();
+      currentMode    = FACE_THINKING;
+      stateStartTime = now;
+      nanoid_audio_play("/snd/thinking.wav");
+      drawBMP(SPR_CONFUSED, 0, 0, true);
+      lastFloatOffset = 0;
+      Serial.println("Thinking...");
+    }
+    pwrHoldArmed = false;
+    pwrLongFired = false;
+  }
+
   pwrButtonPrev = pwrButton;
 
   // ── TOUCH ──
@@ -900,6 +932,48 @@ void loop() {
       Serial.println("Wave triggered!");
       return;
     }
+  }
+
+  if (currentMode == FACE_LISTEN_PREP) {
+    // On first tick of prep: reconfigure ES7210 codec while MCLK is live
+    if (now - stateStartTime < 10) {
+      nanoid_mic_prep();
+    }
+    // After 400ms settle, open I2S and start recording
+    if (now - stateStartTime >= 400) {
+      nanoid_mic_start();
+      micStartTime = millis();
+      currentMode  = FACE_LISTEN;
+      Serial.printf("Mic started. micStartTime=%lu\n", micStartTime);
+      Serial.println("Listen mode triggered.");
+    }
+    return;
+  }
+
+  if (currentMode == FACE_LISTEN) {
+    // Float on confused face while holding button and recording
+    if (now - lastFloatDraw >= FLOAT_INTERVAL) {
+      int newOffset = getFloatOffset();
+      drawBMP(SPR_CONFUSED, newOffset, lastFloatOffset);
+      lastFloatOffset = newOffset;
+      lastFloatDraw   = now;
+    }
+    return;
+  }
+
+  if (currentMode == FACE_THINKING) {
+    // Wait for mic processing to finish, then react
+    if (!nanoid_mic_busy()) {
+      const char* transcript = nanoid_mic_last_transcript();
+      if (strlen(transcript) > 0) {
+        Serial.print("Transcript: "); Serial.println(transcript);
+        // TODO: send to LLM — next phase
+        triggerReaction(REACTION_HAPPY);
+      } else {
+        returnToNormal();
+      }
+    }
+    return;
   }
 
   if (currentMode == FACE_GLITCH) {

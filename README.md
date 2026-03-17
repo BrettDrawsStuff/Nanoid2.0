@@ -3,21 +3,16 @@
 
 Nanoid is an open-source desk companion device built around the Waveshare ESP32-S3 1.75" round AMOLED display. It has a fully animated character, a voice pipeline, and an AI brain powered by Claude. You can talk to it, and it talks back — with personality.
 
-It listens through a built-in microphone, transcribes your speech via Google Cloud Speech-to-Text, sends it to Anthropic's Claude API, and displays the response as scrolling text on its round screen while playing a chatter sound. Its personality, memory, and knowledge of you are all loaded from plain text config files on an SD card — fully customizable without reflashing.
-
 ---
 
 ## What Nanoid Can Do
 
-- **Animated Face** — idles with a floating animation and periodic blinks. Reacts to touch, shake, time of day, and weather with different sprite states
+- **Animated Sprites** — idles with a floating animation and periodic blinks. Reacts to touch, shake, time of day, and weather with different sprite states
 - **Weather Awareness** — fetches live weather data and adjusts its appearance (rain, snow, hot, cold, morning, night)
-- **Touch Reactions** — double tap for happy, triple tap for mad, hold-tap pattern to trigger a jump animation
-- **Shake Detection** — physical shake triggers a scared reaction
 - **Walk Mode** — short press of the boot button toggles a walk cycle animation
 - **Voice Pipeline** — hold the boot button to activate listen mode, speak, release to send
 - **Speech-To-Text** — powered by Google Cloud Speech-to-Text REST API (97%+ accuracy)
 - **AI Responses** — powered by Anthropic Claude Haiku with a persistent personality and memory system
-- **Scrolling Text Display** — responses are word-wrapped and scroll up the round screen
 - **Chatter Sounds** — plays a random talk sound while displaying responses
 - **Persistent Memory** — Claude learns facts about you across sessions and saves them to SD
 - **Conversation History** — remembers the last 5 exchanges within a session
@@ -47,7 +42,7 @@ It listens through a built-in microphone, transcribes your speech via Google Clo
 
 ### Accessories
 - **MicroSD Card** — any size, formatted FAT32. Holds all sprites, sounds, and config files
-- **Small Speaker** — connects to the board's JST speaker connector (the board has a built-in amp, any 4Ω or 8Ω speaker works)
+- **Small Speaker** — connects to the board's JST speaker connector, sometimes comes with the ESP32-S3 (the board has a built-in amp, any 4Ω or 8Ω speaker works)
 - **USB-C Cable + power source** — for power and flashing
 
 ---
@@ -185,23 +180,23 @@ YourWiFiPassword
 
 `location.cfg`
 ```
-40.7128
--74.0060
+Latitude
+Longitude
 ```
 
 `google.cfg`
 ```
-AIzaSy_your_google_key_here
+EnTeR_your_google_key_here
 ```
 
 `anthropic.cfg`
 ```
-sk-ant-your_anthropic_key_here
+put--your_anthropic_key_here
 ```
 
-`personality.cfg` — edit this to define Nanoid's character however you want. See the example in `/config-examples/`.
+`personality.cfg` — edit this to define Nanoid's character however you want.
 
-`user.cfg` — tell Nanoid about yourself. The more you put here, the more personalized the responses. See the example in `/config-examples/`.
+`user.cfg` — tell Nanoid about yourself. The more you put here, the more personalized the responses.
 
 4. Add your sprite BMPs and WAV files to the card
 
@@ -231,7 +226,7 @@ On power-up Nanoid plays `boot.wav`, connects to WiFi, syncs time, fetches weath
 ### Touch interactions
 - **Double tap** — happy reaction
 - **Triple tap** — mad reaction
-- **Hold + rapid taps (10–60)** — jump animation
+- **Hold/Rapid taps (10–60)** — jump animation
 - **Tap during sleep/sad** — wake up
 
 ### Button interactions

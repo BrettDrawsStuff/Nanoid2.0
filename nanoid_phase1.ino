@@ -13,6 +13,7 @@
 #include <time.h>
 #include "nanoid_audio.h"
 #include "nanoid_mic.h"
+#include "nanoid_llm.h"
 
 // ─── DISPLAY SETUP ────────────────────────────────────────────────────────────
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(
@@ -162,10 +163,21 @@ enum Mode {
   FACE_LISTEN_PREP,  // codec reinit happening, waiting for MCLK settle
   FACE_LISTEN,
   FACE_THINKING,
+  FACE_TALKING,
 };
 
 Mode currentMode  = FACE_NORMAL;
 int currentSprite = SPR_NORMAL;
+
+static char      pendingResponse[512] = {0};
+static LLMEmotion pendingEmotion      = LLM_EMOTION_HAPPY;
+
+// Scroll state for FACE_TALKING
+static int   scrollY        = 0;   // current top-of-text Y pixel (starts below screen)
+static int   scrollTotalH   = 0;   // total height of text block in pixels
+static unsigned long lastScrollTick = 0;
+#define SCROLL_SPEED_MS    80   // ms between redraws — less frequent = less flicker
+#define SCROLL_PX_PER_TICK  4   // pixels jumped per redraw
 
 enum Reaction {
   REACTION_NONE,
@@ -202,11 +214,11 @@ bool isBlinking  = false;
 bool inSleepMode = false;
 
 const unsigned long BLINK_INTERVAL = 3000;
-const unsigned long BLINK_LENGTH   = 150;
+const unsigned long BLINK_LENGTH   = 60;
 
 const unsigned long REACTION_FACE_DURATION = 2000;
-const unsigned long REACTION_TEXT_DURATION = 4000;
-const unsigned long REACTION_HOLD_DURATION = 10000;
+const unsigned long REACTION_TEXT_DURATION = 8000;
+const unsigned long REACTION_HOLD_DURATION = 5000;
 
 const unsigned long SCARED_FACE_1_DURATION = 2000;
 const unsigned long SCARED_TEXT_DURATION   = 4000;
@@ -221,13 +233,13 @@ enum ScaredPhase {
 };
 ScaredPhase scaredPhase = SCARED_PHASE_FACE1;
 
-const unsigned long SAD_TIMEOUT   = 5UL  * 60 * 1000;
-const unsigned long SLEEP_TIMEOUT = 15UL * 60 * 1000;
+const unsigned long SAD_TIMEOUT   = 10UL * 60 * 1000;
+const unsigned long SLEEP_TIMEOUT = 30UL * 60 * 1000;
 
 const unsigned long ZZZ_INTERVAL     = 60000;
 const unsigned long ZZZ_DURATION     = 4000;
 const uint8_t       SLEEP_BRIGHTNESS = 75;
-const uint8_t       AWAKE_BRIGHTNESS = 150;
+const uint8_t       AWAKE_BRIGHTNESS = 120;
 
 const unsigned long GLITCH_DURATION   = 2000;
 const unsigned long GLITCH_FRAME_RATE = 16;
@@ -394,6 +406,92 @@ void drawTextCentered(const char* message) {
   drawTextScreen(message, SCREEN_CX - (msgLen * 12), SCREEN_CY - 20);
 }
 
+// ─── SANITIZE LLM TEXT FOR ASCII DISPLAY ─────────────────────────────────────
+// Replaces multi-byte Unicode punctuation with ASCII equivalents.
+// The GFX built-in font is ASCII only — anything outside 0x20-0x7E prints garbage.
+String sanitizeForDisplay(const char* input) {
+  String out = "";
+  const uint8_t* s = (const uint8_t*)input;
+  while (*s) {
+    // Em dash — (E2 80 94) and en dash – (E2 80 93) → " - "
+    if (s[0]==0xE2 && s[1]==0x80 && (s[2]==0x93 || s[2]==0x94)) {
+      out += " - "; s += 3;
+    }
+    // Left/right single curly quotes ' ' (E2 80 98 / E2 80 99) → '
+    else if (s[0]==0xE2 && s[1]==0x80 && (s[2]==0x98 || s[2]==0x99)) {
+      out += '\''; s += 3;
+    }
+    // Left/right double curly quotes " " (E2 80 9C / E2 80 9D) → "
+    else if (s[0]==0xE2 && s[1]==0x80 && (s[2]==0x9C || s[2]==0x9D)) {
+      out += '"'; s += 3;
+    }
+    // Ellipsis … (E2 80 A6) → ...
+    else if (s[0]==0xE2 && s[1]==0x80 && s[2]==0xA6) {
+      out += "..."; s += 3;
+    }
+    // Strip any remaining non-ASCII bytes
+    else if (s[0] > 0x7E) {
+      s++;
+    }
+    else {
+      out += (char)s[0]; s++;
+    }
+  }
+  return out;
+}
+// Round display: safe inscribed area is ~330x330px centered on 466x466
+// Text size 3 = 18px wide × 24px tall per char
+#define RESP_TEXT_SIZE      3
+#define RESP_CHAR_W         18
+#define RESP_CHAR_H         24
+#define RESP_LINE_SPACING   8
+#define RESP_MAX_LINE_CHARS 16
+#define RESP_SAFE_X         83
+#define RESP_LINES_MAX      24
+
+static String respLines[RESP_LINES_MAX];
+static int    respLineCount = 0;
+
+// Call once when response arrives — splits into word-wrapped lines
+void prepareResponseLines(const char* message) {
+  respLineCount = 0;
+  String remaining = String(message);
+  while (remaining.length() > 0 && respLineCount < RESP_LINES_MAX) {
+    remaining.trim();
+    if (remaining.length() == 0) break;
+    if ((int)remaining.length() <= RESP_MAX_LINE_CHARS) {
+      respLines[respLineCount++] = remaining;
+      break;
+    }
+    int cut = RESP_MAX_LINE_CHARS;
+    while (cut > 0 && remaining[cut] != ' ') cut--;
+    if (cut == 0) cut = RESP_MAX_LINE_CHARS;
+    respLines[respLineCount++] = remaining.substring(0, cut);
+    remaining = remaining.substring(cut);
+  }
+  int lineH    = RESP_CHAR_H + RESP_LINE_SPACING;
+  scrollTotalH = respLineCount * lineH;
+}
+
+// Draw all lines at a given Y offset — uses targeted clearing to avoid fillScreen strobe
+void drawResponseScroll(int yOffset) {
+  gfx->setTextColor(RGB565_WHITE);
+  gfx->setTextSize(RESP_TEXT_SIZE, RESP_TEXT_SIZE, 1);
+  int lineH = RESP_CHAR_H + RESP_LINE_SPACING;
+
+  for (int i = 0; i < respLineCount; i++) {
+    int y = yOffset + i * lineH;
+    if (y + lineH < 0 || y > SCREEN_H) continue;
+    // Clear the full line slot (char height + spacing + a few extra px buffer)
+    gfx->fillRect(0, y - SCROLL_PX_PER_TICK - 1, SCREEN_W, lineH + SCROLL_PX_PER_TICK + 2, RGB565_BLACK);
+    int lineW = respLines[i].length() * RESP_CHAR_W;
+    int x = SCREEN_CX - lineW / 2;
+    if (x < RESP_SAFE_X) x = RESP_SAFE_X;
+    gfx->setCursor(x, y);
+    gfx->print(respLines[i]);
+  }
+}
+
 void drawUghText() {
   gfx->fillScreen(RGB565_BLACK);
   gfx->setTextColor(RGB565_WHITE);
@@ -525,14 +623,34 @@ int getContextSprite(bool wantBlink) {
 // ─── REACTION TRIGGER ─────────────────────────────────────────────────────────
 void triggerReaction(Reaction r) {
   activeReaction = r;
-  currentMode    = FACE_REACTION;
   stateStartTime = millis();
   isBlinking     = false;
-  if (r == REACTION_HAPPY)        { currentSprite = SPR_HAPPY;   nanoid_audio_play("/snd/happy.wav");   Serial.println("Reaction: HAPPY"); }
-  else if (r == REACTION_MAD)     { currentSprite = SPR_MAD;     nanoid_audio_play("/snd/mad.wav");     Serial.println("Reaction: MAD"); }
-  else if (r == REACTION_DISGUST) { currentSprite = SPR_DISGUST; nanoid_audio_play("/snd/disgust.wav"); Serial.println("Reaction: DISGUST"); }
-  else if (r == REACTION_SCARED)  { currentSprite = SPR_SCARED;  scaredPhase = SCARED_PHASE_FACE1; nanoid_audio_play("/snd/scared.wav"); Serial.println("Reaction: SCARED"); }
-  drawBMP(currentSprite, 0, 0, true);
+  if (r == REACTION_HAPPY) {
+    currentSprite = SPR_HAPPY;
+    nanoid_audio_play("/snd/happy.wav");
+    Serial.println("Reaction: HAPPY");
+    currentMode = TEXT_REACTION;
+    drawTextCentered("hi!");
+  } else if (r == REACTION_MAD) {
+    currentSprite = SPR_MAD;
+    nanoid_audio_play("/snd/mad.wav");
+    Serial.println("Reaction: MAD");
+    currentMode = TEXT_REACTION;
+    drawTextCentered("hisssss.");
+  } else if (r == REACTION_DISGUST) {
+    currentSprite = SPR_DISGUST;
+    nanoid_audio_play("/snd/disgust.wav");
+    Serial.println("Reaction: DISGUST");
+    currentMode = TEXT_REACTION;
+    drawUghText();
+  } else if (r == REACTION_SCARED) {
+    currentSprite = SPR_SCARED;
+    scaredPhase   = SCARED_PHASE_FACE1;
+    nanoid_audio_play("/snd/scared.wav");
+    Serial.println("Reaction: SCARED");
+    currentMode = FACE_REACTION;
+    drawBMP(currentSprite, 0, 0, true);
+  }
   lastFloatOffset = 0;
 }
 
@@ -720,6 +838,23 @@ void scheduleNextIdleSound() {
   nextIdleSound = millis() + (3UL * 60 * 1000) + random(7UL * 60 * 1000);
 }
 
+// Pick a random talk sound — add talk1.wav through talk6.wav to SD card
+void playTalkSound() {
+  const char* talkSounds[] = {
+    "/snd/talk1.wav", "/snd/talk2.wav", "/snd/talk3.wav",
+    "/snd/talk4.wav", "/snd/talk5.wav", "/snd/talk6.wav",
+    "/snd/talk7.wav", "/snd/talk8.wav", "/snd/talk9.wav",
+    "/snd/talk10.wav"
+  };
+  int count = 0;
+  for (int i = 0; i < 10; i++) {
+    if (SD_MMC.exists(talkSounds[i])) count++;
+    else break;
+  }
+  if (count == 0) return;
+  nanoid_audio_play(talkSounds[random(count)]);
+}
+
 // ─── SETUP ────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
@@ -744,7 +879,7 @@ void setup() {
 
   nanoid_audio_init();
   nanoid_mic_init();
-  nanoid_mic_scan_i2c();
+  nanoid_llm_init();
   initWifi();
   initWebServer();
   loadLocationConfig();
@@ -824,6 +959,8 @@ void loop() {
         lastWalkFrame    = now;
         lastActivityTime = now;
         nanoid_audio_play("/snd/walk.wav");
+        gfx->fillScreen(BG_COLOR);
+        drawAnimFrame("/walk1.bmp", -1, -1);
         Serial.println("Walk ON");
       } else if (currentMode == FACE_WALK) {
         returnToNormal();
@@ -831,7 +968,6 @@ void loop() {
       }
     }
     if (currentMode == FACE_LISTEN && (millis() - micStartTime >= 1500)) {
-      Serial.printf("Stopping mic. micStartTime=%lu now=%lu elapsed=%lu\n", micStartTime, millis(), millis()-micStartTime);
       // Released during listen (minimum 1.5s recorded) — stop and process
       nanoid_mic_stop();
       currentMode    = FACE_THINKING;
@@ -853,8 +989,22 @@ void loop() {
     uint8_t touched = touch.getPoint(touchX, touchY, touch.getSupportTouchPoint());
     if (touched > 0) {
       lastActivityTime = now;
+      // Tap to dismiss response screen
+      if (currentMode == FACE_TALKING) {
+        // Tap skips straight to emotion reaction
+        switch (pendingEmotion) {
+          case LLM_EMOTION_HAPPY:   triggerReaction(REACTION_HAPPY);   break;
+          case LLM_EMOTION_MAD:     triggerReaction(REACTION_MAD);     break;
+          case LLM_EMOTION_SCARED:  triggerReaction(REACTION_SCARED);  break;
+          case LLM_EMOTION_DISGUST: triggerReaction(REACTION_DISGUST); break;
+          default:                  triggerReaction(REACTION_HAPPY);   break;
+        }
+        pendingResponse[0] = '\0';
+        return;
+      }
       if (currentMode == FACE_SLEEP || currentMode == TEXT_SLEEP || currentMode == FACE_SAD) {
         nanoid_audio_play("/snd/wake.wav");
+        nanoid_llm_clear_history();
         returnToNormal();
         tapCount  = 0;
         touchHeld = false;
@@ -878,6 +1028,8 @@ void loop() {
           tapCount       = 0;
           touchHeld      = false;
           nanoid_audio_play("/snd/jump.wav");
+          gfx->fillScreen(BG_COLOR);
+          drawAnimFrame("/jump1.bmp", -1, -1);
           Serial.println("Jump triggered!");
           return;
         }
@@ -944,7 +1096,6 @@ void loop() {
       nanoid_mic_start();
       micStartTime = millis();
       currentMode  = FACE_LISTEN;
-      Serial.printf("Mic started. micStartTime=%lu\n", micStartTime);
       Serial.println("Listen mode triggered.");
     }
     return;
@@ -962,16 +1113,51 @@ void loop() {
   }
 
   if (currentMode == FACE_THINKING) {
-    // Wait for mic processing to finish, then react
     if (!nanoid_mic_busy()) {
       const char* transcript = nanoid_mic_last_transcript();
       if (strlen(transcript) > 0) {
         Serial.print("Transcript: "); Serial.println(transcript);
-        // TODO: send to LLM — next phase
-        triggerReaction(REACTION_HAPPY);
+        LLMResult llm = nanoid_llm_ask(transcript);
+        if (llm.ok && strlen(llm.text) > 0) {
+          String cleaned = sanitizeForDisplay(llm.text);
+          strncpy(pendingResponse, cleaned.c_str(), sizeof(pendingResponse) - 1);
+          pendingEmotion = llm.emotion;
+          prepareResponseLines(pendingResponse);
+          scrollY        = SCREEN_H + 20;
+          lastScrollTick = millis();
+          currentMode    = FACE_TALKING;
+          stateStartTime = millis();
+          gfx->fillScreen(RGB565_BLACK); // clear once at start
+          playTalkSound();
+          Serial.println("Showing response.");
+        } else {
+          triggerReaction(REACTION_HAPPY);
+        }
       } else {
         returnToNormal();
       }
+    }
+    return;
+  }
+
+  if (currentMode == FACE_TALKING) {
+    // Scroll text upward one pixel at a time
+    if (now - lastScrollTick >= SCROLL_SPEED_MS) {
+      scrollY -= SCROLL_PX_PER_TICK;
+      lastScrollTick = now;
+      drawResponseScroll(scrollY);
+    }
+    // Done when text has scrolled fully off the top, with a short pause at end
+    int endY = -(scrollTotalH + 20);
+    if (scrollY <= endY) {
+      switch (pendingEmotion) {
+        case LLM_EMOTION_HAPPY:   triggerReaction(REACTION_HAPPY);   break;
+        case LLM_EMOTION_MAD:     triggerReaction(REACTION_MAD);     break;
+        case LLM_EMOTION_SCARED:  triggerReaction(REACTION_SCARED);  break;
+        case LLM_EMOTION_DISGUST: triggerReaction(REACTION_DISGUST); break;
+        default:                  triggerReaction(REACTION_HAPPY);   break;
+      }
+      pendingResponse[0] = '\0';
     }
     return;
   }
@@ -1070,13 +1256,6 @@ void loop() {
       } else if (scaredPhase == SCARED_PHASE_SAD && now - stateStartTime >= SCARED_SAD_DURATION) {
         returnToNormal();
       }
-      return;
-    }
-    if (now - stateStartTime >= REACTION_FACE_DURATION) {
-      currentMode = TEXT_REACTION; stateStartTime = now;
-      if (activeReaction == REACTION_HAPPY)        drawTextCentered("hi!");
-      else if (activeReaction == REACTION_MAD)     drawTextCentered("hisssss.");
-      else if (activeReaction == REACTION_DISGUST) drawUghText();
     }
     return;
   }

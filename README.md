@@ -20,7 +20,7 @@ Nanoid is an open-source desk companion device built around the Waveshare ESP32-
 - **Sad Mode** — triggers after 10 minutes of inactivity
 - **Sleep Mode** — triggers after 30 minutes of inactivity, wakes on touch
 - **Glitch Effects** — occasional glitch animations for personality
-- **Web Dashboard** — shows current time, weather, and IP address on your local network
+- **Web Server** — references for current time, weather, and IP address on your local network
 - **Fully Customizable** — personality, user info, and memory all live on the SD card as plain text files
 
 ---
@@ -217,7 +217,7 @@ put--your_anthropic_key_here
 On power-up Nanoid plays `boot.wav`, connects to WiFi, syncs time, fetches weather, and settles into its idle animation.
 
 ### Talking to Nanoid
-1. **Hold the BOOT button** for 2.5 seconds — the confused face appears indicating listen mode
+1. **Hold the button** for 2 - 3 seconds — the confused face appears indicating listen mode
 2. **Speak** your message
 3. **Release the button** — Nanoid thinks (confused face + thinking sound)
 4. The response scrolls up the screen while a chatter sound plays
@@ -234,7 +234,7 @@ On power-up Nanoid plays `boot.wav`, connects to WiFi, syncs time, fetches weath
 - **Long press (2.5s)** — activate voice/listen mode
 
 ### Idle behavior
-Nanoid will occasionally wave, express disgust, or play idle sounds on its own. After 10 minutes of inactivity it goes sad. After 30 minutes it sleeps. Tap the screen to wake it.
+Nanoid will occasionally wave, express disgust, glitch, or play idle sounds on its own. After 10 minutes of inactivity it goes sad. After 30 minutes it sleeps. Tap the screen to wake it.
 
 ---
 
@@ -275,13 +275,13 @@ nanoid_phase1/
 
 ## License
 
-MIT License — do whatever you want with it. If you build something cool, share it, and tag me! @BrettDrawsStuff.
+CC0 License — do whatever you want with it. If you build something cool, share it and tag me! @BrettDrawsStuff.
 
 ---
 
 ## Contributing
 
-Pull requests welcome. If you add new sprite sets, sound packs, or personality configs, consider submitting them to the `/extras/` folder.
+Pull requests welcome. If you add new sprite sets, sound packs, or personality configs, consider submitting them to an `/extras/` folder.
 
 ---
 

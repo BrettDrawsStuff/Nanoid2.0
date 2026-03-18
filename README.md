@@ -14,8 +14,8 @@ Nanoid is an open-source desk companion device built around the Waveshare ESP32-
 - **Speech-To-Text** — powered by Google Cloud Speech-to-Text REST API (97%+ accuracy)
 - **AI Responses** — powered by Anthropic Claude Haiku with a persistent personality and memory system
 - **Chatter Sounds** — plays a random talk sound while displaying responses
-- **Persistent Memory** — Claude learns facts about you across sessions and saves them to SD
-- **Conversation History** — remembers up to the last 10 exchanges within a session
+- **Persistent Memory** — Claude learns facts about you across sessions and saves them to SD, up to 10
+- **Conversation History** — remembers the last 5 exchanges within a session
 - **Idle Behavior** — random wave and disgust animations, idle sounds on a timer
 - **Sad Mode** — triggers after 10 minutes of inactivity
 - **Sleep Mode** — triggers after 30 minutes of inactivity, wakes on touch

@@ -13,6 +13,8 @@ Now moving forward to March 2026, BrettDrawsStuff wanted revisit the concept to 
 
 Nanoid 2.0 is CC0, open-source, and fully customizable for you to make it more personal to you to have fun with.
 
+---
+
 ## What Nanoid Can Do
 
 - **Animated Sprites** — idles with a floating animation and periodic blinks. Reacts to touch, shake, time of day, and weather with different sprite states

@@ -991,14 +991,7 @@ void loop() {
       lastActivityTime = now;
       // Tap to dismiss response screen
       if (currentMode == FACE_TALKING) {
-        // Tap skips straight to emotion reaction
-        switch (pendingEmotion) {
-          case LLM_EMOTION_HAPPY:   triggerReaction(REACTION_HAPPY);   break;
-          case LLM_EMOTION_MAD:     triggerReaction(REACTION_MAD);     break;
-          case LLM_EMOTION_SCARED:  triggerReaction(REACTION_SCARED);  break;
-          case LLM_EMOTION_DISGUST: triggerReaction(REACTION_DISGUST); break;
-          default:                  triggerReaction(REACTION_HAPPY);   break;
-        }
+        returnToNormal();
         pendingResponse[0] = '\0';
         return;
       }
@@ -1150,13 +1143,7 @@ void loop() {
     // Done when text has scrolled fully off the top, with a short pause at end
     int endY = -(scrollTotalH + 20);
     if (scrollY <= endY) {
-      switch (pendingEmotion) {
-        case LLM_EMOTION_HAPPY:   triggerReaction(REACTION_HAPPY);   break;
-        case LLM_EMOTION_MAD:     triggerReaction(REACTION_MAD);     break;
-        case LLM_EMOTION_SCARED:  triggerReaction(REACTION_SCARED);  break;
-        case LLM_EMOTION_DISGUST: triggerReaction(REACTION_DISGUST); break;
-        default:                  triggerReaction(REACTION_HAPPY);   break;
-      }
+      returnToNormal();
       pendingResponse[0] = '\0';
     }
     return;

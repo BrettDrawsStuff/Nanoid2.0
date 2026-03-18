@@ -5,6 +5,14 @@ Nanoid is an open-source desk companion device built around the Waveshare ESP32-
 
 ---
 
+## Nanoid Lore
+
+In June 2025, BrettDrawsStuff created a small digital art collection of small creatures living in our devices only to cause chaos, inspired by the glitches, bugs, and mishaps that seem to happen on their own. The Nanoid art collection consists of 101 individual, hand-drawn little critters that come with their own customized personality description based on their nonsensical name, where they live within a device, and what kind of mischief they get up to, along with a 2nd "up close" view of the Nanoid. You can view the entire art collection here on the ethereum blockchain: [Nanoid Art Collection](https://opensea.io/collection/nanoids)
+
+Now moving forward to March 2026, BrettDrawsStuff wanted revisit the concept to give life to one of those mischievous little critters. Utilizing hand-drawn animated sprites, speech-to-text, and LLM capabilities so you can now interact with and talk to Nanoid 2.0!
+
+Nanoid 2.0 is CC0, open-source, and fully customizable for you to make it more personal to you to have fun with.
+
 ## What Nanoid Can Do
 
 - **Animated Sprites** — idles with a floating animation and periodic blinks. Reacts to touch, shake, time of day, and weather with different sprite states

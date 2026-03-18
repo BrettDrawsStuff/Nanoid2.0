@@ -181,7 +181,7 @@ static void updateMemory(const String& userMsg, const String& assistantMsg) {
         "You are a memory manager for a desk companion AI called Nanoid. "
         "Given the current memory and a new conversation exchange, update the memory "
         "with any new facts worth remembering about the user — preferences, topics mentioned, "
-        "things that happened, how they seem to feel. Keep it concise: max 6 bullet points, "
+        "things that happened, how they seem to feel. Keep it concise: max 10 bullet points, "
         "each under 15 words. Only include things genuinely worth remembering across sessions. "
         "Return ONLY the updated bullet list, nothing else.";
     String memUserMsg =

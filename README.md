@@ -8,14 +8,14 @@ Nanoid is an open-source desk companion device built around the Waveshare ESP32-
 ## What Nanoid Can Do
 
 - **Animated Sprites** — idles with a floating animation and periodic blinks. Reacts to touch, shake, time of day, and weather with different sprite states
-- **Weather Awareness** — fetches live weather data and adjusts its appearance (rain, snow, hot, cold, morning, night)
-- **Walk Mode** — short press of the boot button toggles a walk cycle animation
-- **Voice Pipeline** — hold the boot button to activate listen mode, speak, release to send
+- **Weather/Time Awareness** — fetches live weather data and time of day and adjusts its appearance (rain, snow, hot, cold, morning, night)
+- **Walk Mode** — short press of the button toggles a walk cycle animation
+- **Voice Pipeline** — hold the button to activate listen mode, speak, release to send
 - **Speech-To-Text** — powered by Google Cloud Speech-to-Text REST API (97%+ accuracy)
 - **AI Responses** — powered by Anthropic Claude Haiku with a persistent personality and memory system
 - **Chatter Sounds** — plays a random talk sound while displaying responses
 - **Persistent Memory** — Claude learns facts about you across sessions and saves them to SD
-- **Conversation History** — remembers the last 5 exchanges within a session
+- **Conversation History** — remembers up to the last 10 exchanges within a session
 - **Idle Behavior** — random wave and disgust animations, idle sounds on a timer
 - **Sad Mode** — triggers after 10 minutes of inactivity
 - **Sleep Mode** — triggers after 30 minutes of inactivity, wakes on touch

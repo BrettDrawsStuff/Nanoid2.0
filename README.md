@@ -42,7 +42,7 @@ Nanoid is an open-source desk companion device built around the Waveshare ESP32-
 
 ### Accessories
 - **MicroSD Card** — any size, formatted FAT32. Holds all sprites, sounds, and config files
-- **Small Speaker** — connects to the board's JST speaker connector, sometimes comes with the ESP32-S3 (the board has a built-in amp, any 4Ω or 8Ω speaker works)
+- **Small Speaker** — connects to the board's JST speaker connector, sometimes included with the ESP32-S3 (the board has a built-in amp, any 4Ω or 8Ω speaker works)
 - **USB-C Cable + power source** — for power and flashing
 
 ---

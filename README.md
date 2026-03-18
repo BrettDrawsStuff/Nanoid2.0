@@ -250,7 +250,7 @@ Edit `/user.cfg` to tell Nanoid about yourself — your interests, job, sense of
 After each conversation, Nanoid automatically updates `/memory.txt` with facts it wants to remember about you across sessions. You can read and edit this file at any time.
 
 ### Sprites
-Swap out any BMP file on the SD card to change Nanoid's appearance. The sprite resolution is 466×466 for face sprites. Walk and jump frames can be any size — they're centered on the display.
+Swap out any BMP file on the SD card to change Nanoid's appearance. The sprite resolution is 466×466 for face sprites. Walk and jump frames cropped to 145×383 for increased frame loading speed — they're centered on the display.
 
 ### Sounds
 Replace any WAV file in `/snd/` to change Nanoid's sounds. Add up to 10 talk sounds (`talk1.wav`–`talk10.wav`) for variety during AI responses — Nanoid picks one at random each time.

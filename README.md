@@ -204,9 +204,15 @@ EnTeR_your_google_key_here
 put--your_anthropic_key_here
 ```
 
-`personality.cfg` — edit this to define Nanoid's character however you want.
+`personality.cfg`
+```
+Edit this to define Nanoid's character however you want.
+```
 
-`user.cfg` — tell Nanoid about yourself. The more you put here, the more personalized the responses.
+`user.cfg` 
+```
+Tell Nanoid about yourself. The more you put here, the more personalized the responses.
+```
 
 4. Add your sprite BMPs and WAV files to the card
 
@@ -217,7 +223,7 @@ put--your_anthropic_key_here
 4. Connect Nanoid via USB-C
 5. Click Upload
 
-> If the upload fails, hold the BOOT button, press and release RESET, then try uploading again.
+> If the upload fails, hold the BOOT button, press and release RESET, then try uploading again. If there is something more than that, asking Claude may be helpful.
 
 ---
 
@@ -259,11 +265,14 @@ Edit `/user.cfg` to tell Nanoid about yourself — your interests, job, sense of
 ### Memory
 After each conversation, Nanoid automatically updates `/memory.txt` with facts it wants to remember about you across sessions. You can read and edit this file at any time.
 
+### Location
+Edit `/location.cfg` based on you your current location so Nanoid can keep up with the local weather. It will bypass weather sprite options if left blank.
+
 ### Sprites
 Swap out any BMP file on the SD card to change Nanoid's appearance. The sprite resolution is 466×466 for face sprites. Walk and jump frames cropped to 145×383 for increased frame loading speed — they're centered on the display.
 
 ### Sounds
-Replace any WAV file in `/snd/` to change Nanoid's sounds. Add up to 10 talk sounds (`talk1.wav`–`talk10.wav`) for variety during AI responses — Nanoid picks one at random each time.
+Replace any WAV file in `/snd/` to change Nanoid's sounds.
 
 ---
 
@@ -296,3 +305,7 @@ Pull requests welcome. If you add new sprite sets, sound packs, or personality c
 ---
 
 *Nanoid is an open-source project. The character, artwork, and personality configs in this repository are original works — please respect that if you redistribute.*
+
+---
+
+@BrettDrawsStuff [BrettDrawsStuff.art](https://brettdrawsstuff.art)

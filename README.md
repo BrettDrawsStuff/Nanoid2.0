@@ -298,12 +298,6 @@ CC0 License — do whatever you want with it. If you build something cool, share
 
 ---
 
-## Contributing
-
-Pull requests welcome. If you add new sprite sets, sound packs, or personality configs, consider submitting them to an `/extras/` folder.
-
----
-
 *Nanoid is an open-source project. The character, artwork, and personality configs in this repository are original works. Please respect that if you redistribute.*
 
 ---
